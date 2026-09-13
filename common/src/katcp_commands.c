@@ -1,5 +1,6 @@
 #include "katcp_commands.h"
 #include "synth.h"
+#include "sensor.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -83,6 +84,8 @@ const katcp_cmd_t katcp_command_table[] = {
     { "help",             "Describe available requests.",              cmd_help },
     { "synth-frequency",  "Set synth output frequency in Hz.",         cmd_synth_frequency },
     { "synth-locked",     "Report synth PLL lock status (0/1).",       cmd_synth_locked },
+    { "sensor-list",      "List available sensors, or describe one.", cmd_sensor_list },
+    { "sensor-value",     "Report current sensor value(s).",          cmd_sensor_value },
 };
 const int katcp_command_table_len =
     sizeof(katcp_command_table) / sizeof(katcp_command_table[0]);

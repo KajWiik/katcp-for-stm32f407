@@ -1,121 +1,35 @@
-# katcp-w5500-pico
+# katcp-for-w5500-evb-pico-rp2040-w5500
 
-Minimal KATCP server for the W5500-EVB-Pico, controlling an SPI
-synthesizer. Bare-metal Pico SDK, no Arduino.
+A KATCP server (radio-astronomy monitor-and-control protocol) for
+controlling an SPI-driven synthesizer, designed to run on more than one
+piece of hardware. The protocol, command handling, and sensor logic
+are written once as plain, transport-agnostic C and shared across
+every target; only the networking/SPI glue differs per board.
 
 ## Layout
 
 ```
-include/
-  katcp_proto.h      -- wire protocol: framing, escaping, dispatch (transport-agnostic)
-  katcp_commands.h   -- the command table (?halt, ?watchdog, ?synth-frequency, ...)
-  synth.h            -- fixed contract for the synth driver (chip-specific code not yet written)
-src/
-  katcp_proto.c      -- protocol implementation
-  katcp_commands.c   -- command handlers
-  synth_stub.c        -- placeholder synth driver; returns "not implemented"
-  main.c             -- Pico SDK + W5500 glue: SPI init, TCP socket loop, feeds the parser
-CMakeLists.txt
+common/            -- shared, target-agnostic code (protocol, commands, sensors, synth contract)
+  include/
+  src/
+targets/           -- one directory per piece of hardware; each owns its own build
+  rp2040-w5500-pico/   -- W5500-EVB-Pico, Pico SDK + WIZnet ioLibrary_Driver (built)
+  stm32-e407/          -- Olimex STM32-E407, ChibiOS + lwIP, native MAC (planned)
+test/              -- host-only helpers for building/running common/ as desktop C
+IMPLEMENTATION.md  -- full design writeup and command reference (target-agnostic)
 ```
 
-`katcp_proto.c` doesn't know about sockets or SPI at all -- it's plain C
-you could unit-test on your desktop by feeding it byte arrays and
-capturing what it hands to an `out()` callback. `main.c` is the only
-file that knows this is running on a W5500-EVB-Pico.
+Start with `IMPLEMENTATION.md` for how the protocol and commands work.
+Each target directory has its own README for board-specific setup,
+build, and flashing instructions.
 
-## One-time toolchain setup
+## Why split this way
 
-You'll need: `cmake`, `arm-none-eabi-gcc` toolchain, `git`, and the Pico
-SDK itself. On Debian/Ubuntu:
-
-```bash
-sudo apt install cmake gcc-arm-none-eabi libnewlib-arm-none-eabi build-essential git
-```
-
-Clone the Pico SDK somewhere and point `PICO_SDK_PATH` at it (add this
-to your shell rc file so it persists):
-
-```bash
-git clone -b master https://github.com/raspberrypi/pico-sdk.git ~/pico-sdk
-cd ~/pico-sdk && git submodule update --init
-export PICO_SDK_PATH=~/pico-sdk
-```
-
-Copy the SDK's CMake bootstrap file into this project (it's a small
-fixed file, not something you edit):
-
-```bash
-cp $PICO_SDK_PATH/external/pico_sdk_import.cmake .
-```
-
-## WIZnet ioLibrary_Driver (W5500 hardware driver)
-
-Vendor it as a submodule rather than a plain clone, so the exact
-commit is pinned:
-
-```bash
-git submodule add https://github.com/Wiznet/ioLibrary_Driver.git third_party/ioLibrary_Driver
-git submodule update --init --recursive
-```
-
-## Build
-
-```bash
-mkdir build && cd build
-cmake ..
-make -j4
-```
-
-This produces `build/katcp_w5500_pico.uf2`.
-
-## Flash
-
-Hold BOOTSEL on the board while plugging in USB (or while pressing the
-board's reset if BOOTSEL is wired separately), which mounts it as a USB
-mass-storage device (`RPI-RP2`). Then:
-
-```bash
-cp build/katcp_w5500_pico.uf2 /media/$USER/RPI-RP2/
-```
-
-The board reboots and runs the firmware immediately -- no separate
-"flash" step or debugger required for this basic workflow. (SWD +
-`openocd`/`gdb` is available later if you want breakpoint debugging.)
-
-## Before this does anything useful
-
-Two things are still open, deliberately left as the next steps rather
-than guessed at:
-
-1. **Network config** -- `net_info` in `main.c` is a static placeholder
-   (`192.168.1.200/24`, gateway `.1`). Change it to match your control
-   network before flashing, and give each unit a distinct MAC (the
-   locally-administered `02:00:00:00:00:01` placeholder must be unique
-   per box on the same segment).
-
-2. **Synth driver** -- `src/synth_stub.c` always reports failure.
-   Once the specific IC is chosen, replace it with `synth_<part>.c`
-   implementing the three functions in `include/synth.h`
-   (`synth_init`, `synth_set_frequency`, `synth_is_locked`) --
-   the KATCP command layer doesn't need to change.
-
-## Testing the protocol without hardware
-
-Since `katcp_proto.c` has no socket/SPI dependency, you can `nc` into
-port 7147 once it's running on the network and try it by hand:
-
-```
-$ nc 192.168.1.200 7147
-?watchdog
-!watchdog ok
-?help
-#help halt Halt the device.
-#help watchdog Check the server is alive.
-...
-!help ok 6
-?synth-frequency 1000000000
-!synth-frequency fail synth programming failed or out of range
-```
-
-That last `fail` is expected and correct until the real synth driver
-replaces the stub.
+`common/` has no dependency on any RTOS, vendor HAL, or board -- it's
+plain ISO C, and can be compiled and tested as ordinary desktop code
+(see `IMPLEMENTATION.md` section 7, and `test/platform_host.c`). Each
+target under `targets/` supplies only what's genuinely
+board-specific: the network transport, SPI glue, and a one-function
+`platform_now_ms()` time source. Adding a new target means writing
+that glue against the existing `common/include` contracts, not
+touching or duplicating the protocol/command/sensor logic.

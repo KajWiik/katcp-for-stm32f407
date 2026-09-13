@@ -11,6 +11,7 @@
  * and interrupt on GPIO20/21.
  */
 
+#include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -21,10 +22,12 @@
 #include "wizchip_conf.h"
 #include "w5500.h"
 #include "socket.h"
+#include "dhcp.h"
 
 #include "katcp_proto.h"
 #include "katcp_commands.h"
 #include "synth.h"
+#include "platform.h"
 
 /* ---- W5500-EVB-Pico fixed pinout (SPI0) --------------------------------- */
 #define PIN_MISO  16
@@ -36,11 +39,16 @@
 
 #define SPI_PORT  spi0
 
-/* ---- network config -----------------------------------------------------
- * TODO: replace with your site's addressing (static, matching whatever
- * subnet the control network uses). DHCP is possible via ioLibrary_Driver's
- * DHCP module but is extra moving parts you probably don't want on a
- * single-purpose control box -- static keeps this deterministic. */
+/* ---- network config -------------------------------------------------------
+ * This is both the fallback config (used as-is if DHCP times out, see
+ * dhcp_bringup() below) and the baseline the chip is programmed with
+ * *before* DHCP is attempted, so the device always has some valid
+ * config from the moment wizchip_init() returns.
+ *
+ * TODO: replace ip/sn/gw/dns with your site's static addressing, and
+ * give each unit a distinct MAC (the locally-administered
+ * 02:00:00:00:00:01 placeholder below must be unique per box on the
+ * same segment, DHCP or not -- DHCP servers key leases on it too). */
 static wiz_NetInfo net_info = {
     .mac = {0x02, 0x00, 0x00, 0x00, 0x00, 0x01}, /* locally-administered MAC -- change per unit */
     .ip  = {192, 168, 1, 200},
@@ -49,6 +57,15 @@ static wiz_NetInfo net_info = {
     .dns = {192, 168, 1, 1},
     .dhcp = NETINFO_STATIC,
 };
+
+/* Seconds to wait for a DHCP lease at boot before giving up and running
+ * on the static net_info above instead. Override with
+ * -DDHCP_TIMEOUT_S=<n> at build time if 30 isn't right for your site. */
+#ifndef DHCP_TIMEOUT_S
+#define DHCP_TIMEOUT_S 30
+#endif
+
+#define DHCP_SOCKET  7   /* kept separate from KATCP_SOCKET (0) below */
 
 #define KATCP_SOCKET   0
 #define KATCP_PORT     7147   /* conventional KATCP/tcpborphserver port */
@@ -116,6 +133,81 @@ static void spi_and_wizchip_init(void)
     wizchip_setnetinfo(&net_info);
 }
 
+/* ---- DHCP bring-up (one-shot, blocking, at startup only) -----------------
+ *
+ * Tries for up to DHCP_TIMEOUT_S seconds to get a lease. On success,
+ * net_info and the chip's own registers are updated to the leased
+ * address. On timeout or failure, net_info is left exactly as
+ * spi_and_wizchip_init() already programmed it -- there is nothing
+ * further to "fall back" to here, since the static config was never
+ * overwritten in the first place.
+ *
+ * This does NOT keep retrying in the background after this call
+ * returns. If no DHCP server is present at boot, the device runs on
+ * the static config for the rest of its uptime, even if a server
+ * later appears. That's a deliberate scope decision (see
+ * IMPLEMENTATION.md) -- extend this if you need it to notice a
+ * server that shows up later, e.g. by calling dhcp_bringup() again
+ * from a `?net-renew`-style command. */
+static uint8_t dhcp_buffer[1024];
+static volatile bool dhcp_got_ip = false;
+
+static void dhcp_ip_assigned(void) { dhcp_got_ip = true; }
+static void dhcp_ip_updated(void)  { dhcp_got_ip = true; }
+static void dhcp_ip_conflict(void)
+{
+    /* Leased address conflicts with something already on the network.
+     * We don't have a good automated recovery for this beyond falling
+     * back to the static config, which the timeout path below already
+     * does -- so just stop trying rather than loop on a bad lease. */
+    dhcp_got_ip = false;
+}
+
+static void dhcp_bringup(void)
+{
+    reg_dhcp_cbfunc(dhcp_ip_assigned, dhcp_ip_updated, dhcp_ip_conflict);
+    DHCP_init(DHCP_SOCKET, dhcp_buffer);
+
+    uint64_t start_ms     = platform_now_ms();
+    uint64_t last_tick_ms = start_ms;
+
+    while (!dhcp_got_ip) {
+        uint64_t now = platform_now_ms();
+
+        if (now - start_ms >= (uint64_t)DHCP_TIMEOUT_S * 1000) {
+            printf("DHCP: no lease after %ds, using static %d.%d.%d.%d\n",
+                   DHCP_TIMEOUT_S, net_info.ip[0], net_info.ip[1],
+                   net_info.ip[2], net_info.ip[3]);
+            DHCP_stop();
+            return;
+        }
+
+        /* DHCP's internal lease/retry timers are driven off wall-clock
+         * seconds, not loop iterations -- must be ticked at ~1 Hz
+         * regardless of how often DHCP_run() itself is called. */
+        if (now - last_tick_ms >= 1000) {
+            DHCP_time_handler();
+            last_tick_ms = now;
+        }
+
+        if (DHCP_run() == DHCP_FAILED) {
+            printf("DHCP: failed, using static %d.%d.%d.%d\n",
+                   net_info.ip[0], net_info.ip[1], net_info.ip[2], net_info.ip[3]);
+            DHCP_stop();
+            return;
+        }
+    }
+
+    getIPfromDHCP(net_info.ip);
+    getGWfromDHCP(net_info.gw);
+    getSNfromDHCP(net_info.sn);
+    getDNSfromDHCP(net_info.dns);
+    net_info.dhcp = NETINFO_DHCP;
+    wizchip_setnetinfo(&net_info);
+    printf("DHCP: leased %d.%d.%d.%d\n",
+           net_info.ip[0], net_info.ip[1], net_info.ip[2], net_info.ip[3]);
+}
+
 /* ---- katcp_out callback: parser hands us bytes, we send() them ---------- */
 static void katcp_out_to_socket(void *user, const char *data, size_t len)
 {
@@ -128,6 +220,7 @@ int main(void)
     stdio_init_all(); /* USB serial, for printf() debug only -- KATCP itself is on Ethernet */
 
     spi_and_wizchip_init();
+    dhcp_bringup();
     synth_init();
 
     int sock = KATCP_SOCKET;
