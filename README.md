@@ -1,93 +1,121 @@
-# KATCP for W5500-EVB-Pico RP2040 + W5500
+# katcp-w5500-pico
 
+Minimal KATCP server for the W5500-EVB-Pico, controlling an SPI
+synthesizer. Bare-metal Pico SDK, no Arduino.
 
-
-## Getting started
-
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
-
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
-
-## Add your files
-
-* [Create](https://docs.gitlab.com/user/project/repository/web_editor/#create-a-file) or [upload](https://docs.gitlab.com/user/project/repository/web_editor/#upload-a-file) files
-* [Add files using the command line](https://docs.gitlab.com/topics/git/add_files/#add-files-to-a-git-repository) or push an existing Git repository with the following command:
+## Layout
 
 ```
-cd existing_repo
-git remote add origin https://version.aalto.fi/gitlab/wiikk1/katcp-for-w5500-evb-pico-rp2040-w5500.git
-git branch -M main
-git push -uf origin main
+include/
+  katcp_proto.h      -- wire protocol: framing, escaping, dispatch (transport-agnostic)
+  katcp_commands.h   -- the command table (?halt, ?watchdog, ?synth-frequency, ...)
+  synth.h            -- fixed contract for the synth driver (chip-specific code not yet written)
+src/
+  katcp_proto.c      -- protocol implementation
+  katcp_commands.c   -- command handlers
+  synth_stub.c        -- placeholder synth driver; returns "not implemented"
+  main.c             -- Pico SDK + W5500 glue: SPI init, TCP socket loop, feeds the parser
+CMakeLists.txt
 ```
 
-## Integrate with your tools
+`katcp_proto.c` doesn't know about sockets or SPI at all -- it's plain C
+you could unit-test on your desktop by feeding it byte arrays and
+capturing what it hands to an `out()` callback. `main.c` is the only
+file that knows this is running on a W5500-EVB-Pico.
 
-* [Set up project integrations](https://version.aalto.fi/gitlab/wiikk1/katcp-for-w5500-evb-pico-rp2040-w5500/-/settings/integrations)
+## One-time toolchain setup
 
-## Collaborate with your team
+You'll need: `cmake`, `arm-none-eabi-gcc` toolchain, `git`, and the Pico
+SDK itself. On Debian/Ubuntu:
 
-* [Invite team members and collaborators](https://docs.gitlab.com/user/project/members/)
-* [Create a new merge request](https://docs.gitlab.com/user/project/merge_requests/creating_merge_requests/)
-* [Automatically close issues from merge requests](https://docs.gitlab.com/user/project/issues/managing_issues/#closing-issues-automatically)
-* [Enable merge request approvals](https://docs.gitlab.com/user/project/merge_requests/approvals/)
-* [Set auto-merge](https://docs.gitlab.com/user/project/merge_requests/auto_merge/)
+```bash
+sudo apt install cmake gcc-arm-none-eabi libnewlib-arm-none-eabi build-essential git
+```
 
-## Test and Deploy
+Clone the Pico SDK somewhere and point `PICO_SDK_PATH` at it (add this
+to your shell rc file so it persists):
 
-Use the built-in continuous integration in GitLab.
+```bash
+git clone -b master https://github.com/raspberrypi/pico-sdk.git ~/pico-sdk
+cd ~/pico-sdk && git submodule update --init
+export PICO_SDK_PATH=~/pico-sdk
+```
 
-* [Get started with GitLab CI/CD](https://docs.gitlab.com/ci/quick_start/)
-* [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/user/application_security/sast/)
-* [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/topics/autodevops/requirements/)
-* [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/user/clusters/agent/)
-* [Set up protected environments](https://docs.gitlab.com/ci/environments/protected_environments/)
+Copy the SDK's CMake bootstrap file into this project (it's a small
+fixed file, not something you edit):
 
-***
+```bash
+cp $PICO_SDK_PATH/external/pico_sdk_import.cmake .
+```
 
-# Editing this README
+## WIZnet ioLibrary_Driver (W5500 hardware driver)
 
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
+Vendor it as a submodule rather than a plain clone, so the exact
+commit is pinned:
 
-## Suggestions for a good README
+```bash
+git submodule add https://github.com/Wiznet/ioLibrary_Driver.git third_party/ioLibrary_Driver
+git submodule update --init --recursive
+```
 
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
+## Build
 
-## Name
-Choose a self-explaining name for your project.
+```bash
+mkdir build && cd build
+cmake ..
+make -j4
+```
 
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
+This produces `build/katcp_w5500_pico.uf2`.
 
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
+## Flash
 
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
+Hold BOOTSEL on the board while plugging in USB (or while pressing the
+board's reset if BOOTSEL is wired separately), which mounts it as a USB
+mass-storage device (`RPI-RP2`). Then:
 
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
+```bash
+cp build/katcp_w5500_pico.uf2 /media/$USER/RPI-RP2/
+```
 
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
+The board reboots and runs the firmware immediately -- no separate
+"flash" step or debugger required for this basic workflow. (SWD +
+`openocd`/`gdb` is available later if you want breakpoint debugging.)
 
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
+## Before this does anything useful
 
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
+Two things are still open, deliberately left as the next steps rather
+than guessed at:
 
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
+1. **Network config** -- `net_info` in `main.c` is a static placeholder
+   (`192.168.1.200/24`, gateway `.1`). Change it to match your control
+   network before flashing, and give each unit a distinct MAC (the
+   locally-administered `02:00:00:00:00:01` placeholder must be unique
+   per box on the same segment).
 
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
+2. **Synth driver** -- `src/synth_stub.c` always reports failure.
+   Once the specific IC is chosen, replace it with `synth_<part>.c`
+   implementing the three functions in `include/synth.h`
+   (`synth_init`, `synth_set_frequency`, `synth_is_locked`) --
+   the KATCP command layer doesn't need to change.
 
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
+## Testing the protocol without hardware
 
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
+Since `katcp_proto.c` has no socket/SPI dependency, you can `nc` into
+port 7147 once it's running on the network and try it by hand:
 
-## License
-For open source projects, say how it is licensed.
+```
+$ nc 192.168.1.200 7147
+?watchdog
+!watchdog ok
+?help
+#help halt Halt the device.
+#help watchdog Check the server is alive.
+...
+!help ok 6
+?synth-frequency 1000000000
+!synth-frequency fail synth programming failed or out of range
+```
 
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+That last `fail` is expected and correct until the real synth driver
+replaces the stub.
