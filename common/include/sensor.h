@@ -4,12 +4,12 @@
 #include <stdint.h>
 #include "katcp_proto.h"
 
-/* Deliberately integer/boolean only -- see IMPLEMENTATION.md for why
- * floating point is avoided on this MCU (no FPU, and %f formatting is
- * not reliably linked in by the newlib-nano config the Pico SDK
- * toolchain typically uses). If a genuinely fractional sensor is ever
- * needed, prefer a scaled integer (e.g. millidegrees) over adding a
- * float type here. */
+/* Deliberately integer/boolean only -- see IMPLEMENTATION.md §6.1 for
+ * why floating point is avoided in this project's wire-facing code
+ * (not an FPU-availability issue -- it's about %f formatting/newlib
+ * reliability and keeping things simple and deterministic). If a
+ * genuinely fractional sensor is ever needed, prefer a scaled integer
+ * (e.g. millidegrees) over adding a float type here. */
 typedef enum {
     SENSOR_BOOLEAN,
     SENSOR_INTEGER,

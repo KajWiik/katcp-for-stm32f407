@@ -96,11 +96,16 @@ include $(CHIBIOS)/os/hal/osal/rt-nil/osal.mk
 include $(CHIBIOS)/os/rt/rt.mk
 include $(CHIBIOS)/os/common/ports/ARMv7-M/compilers/GCC/mk/port.mk
 # lwIP bindings.
+# lwip.mk defaults LWSRC_EXTRAS to the HTTP demo files (which need
+# generated fsdata.c content we don't have and never set up) --
+# override it to pull in the SNTP client instead, which is what
+# src/rtc_sync.c actually needs (see IMPLEMENTATION.md §7).
+LWSRC_EXTRAS = $(SNTPFILES)
 include $(CHIBIOS)/os/various/lwip_bindings/lwip.mk
 
-# Code shared with other targets (e.g. targets/rp2040-w5500-pico) lives
-# two levels up; auto-discover its .c files and include dirs rather
-# than listing them by hand (mirrors CMake's COMMON_DIR on that target).
+# Auto-discover common/'s .c files and include dirs rather than
+# listing them by hand (mirrors what a CMake-based target would do
+# with a COMMON_DIR variable).
 AUTOBUILD_ROOT := ../../common/
 include $(CHIBIOS)/tools/mk/autobuild.mk
 
@@ -112,6 +117,7 @@ LDSCRIPT= $(STARTUPLD)/STM32F407xG.ld
 CSRC = $(ALLCSRC) \
        src/portab.c \
        src/platform_chibios.c \
+       src/rtc_sync.c \
        src/main.c
 
 # C++ sources that can be compiled in ARM or THUMB mode depending on the

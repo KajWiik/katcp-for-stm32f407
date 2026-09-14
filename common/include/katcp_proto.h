@@ -4,7 +4,8 @@
 /*
  * Minimal, transport-agnostic KATCP line protocol.
  *
- * This module knows nothing about TCP, W5500, or the Pico SDK. It is fed
+ * This module knows nothing about TCP, Ethernet, or any RTOS/vendor
+ * HAL. It is fed
  * raw bytes as they arrive (katcp_feed), and calls kp->out(...) with
  * complete reply/inform lines whenever a request has been fully parsed
  * and dispatched. The caller (main.c) is responsible for actually

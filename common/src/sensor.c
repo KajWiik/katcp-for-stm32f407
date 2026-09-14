@@ -117,8 +117,14 @@ static void emit_sensor_value_entry(katcp_ctx_t *ctx, const sensor_def_t *s)
     int64_t v = 0;
     sensor_status_t st = s->read(&v);
 
+    /* KATCP v5 specifies sensor timestamps as UTC seconds, not device
+     * uptime (see IMPLEMENTATION.md §7 for the full discussion). On a
+     * target with no synced wall clock (or before the first sync
+     * completes), platform_wallclock_unix_s() returns 0 -- an honest
+     * "unsynced" signal (1970-01-01) rather than a plausible-looking
+     * but meaningless boot-relative number. */
     char tsbuf[24], valbuf[24];
-    snprintf(tsbuf, sizeof(tsbuf), "%llu", (unsigned long long)platform_now_ms());
+    snprintf(tsbuf, sizeof(tsbuf), "%lu", (unsigned long)platform_wallclock_unix_s());
     if (s->type == SENSOR_BOOLEAN)
         snprintf(valbuf, sizeof(valbuf), "%d", v ? 1 : 0);
     else

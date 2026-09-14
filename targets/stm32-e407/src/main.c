@@ -1,13 +1,12 @@
 /*
  * KATCP server for the Olimex STM32-E407 (Rev E+, LAN8710A PHY),
  * using ChibiOS + lwIP against the board's native Ethernet MAC --
- * no W5500 or other SPI Ethernet chip involved on this target.
+ * no W5500 or other SPI Ethernet chip involved.
  *
  * Board pin/PHY configuration comes entirely from ChibiOS's own
  * OLIMEX_STM32_E407_REV_D board files (see Makefile) -- this file
  * only wires lwIP's socket API to the shared katcp_proto/katcp_commands
- * layer in ../../common, the same way targets/rp2040-w5500-pico/src/main.c
- * wires the WIZnet socket API to it.
+ * layer in ../../common.
  */
 
 #include <string.h>
@@ -19,19 +18,29 @@
 #include "lwip/sockets.h"
 #include "lwip/dhcp.h"
 #include "lwip/netif.h"
+#include "lwip/ip_addr.h"   /* IPADDR4_INIT_BYTES() -- don't rely on it coming in transitively */
 
 #include "katcp_proto.h"
 #include "katcp_commands.h"
 #include "synth.h"
 #include "platform.h"
 #include "portab.h"
+#include "rtc_sync.h"
 
 #define KATCP_PORT 7147
 
+/* ---- time sync (IMPLEMENTATION.md §7) -------------------------------------
+ * TODO: this site's maser/GNSS-disciplined local NTP server -- never
+ * a public pool (see the discussion in IMPLEMENTATION.md §7 on why:
+ * this has nothing to do with the radio-quiet-site networking choices
+ * elsewhere in this project, it's simply that a local reference is
+ * already better than anything public). */
+static const ip4_addr_t ntp_server_ip = IPADDR4_INIT_BYTES(192, 168, 1, 50);
+
 /* ---- network config -------------------------------------------------------
- * Same two-stage policy as the RP2040 target (IMPLEMENTATION.md \u00a75.2):
- * try DHCP for up to DHCP_TIMEOUT_S seconds, then fall back to this
- * static config. Change per deployment; give each unit a distinct MAC. */
+ * DHCP first, static fallback (IMPLEMENTATION.md §5.1): try DHCP for
+ * up to DHCP_TIMEOUT_S seconds, then fall back to this static config.
+ * Change per deployment; give each unit a distinct MAC. */
 static uint8_t mac_address[6] = {0xC2, 0xAF, 0x51, 0x03, 0xCF, 0x01};
 
 #ifndef DHCP_TIMEOUT_S
@@ -42,17 +51,13 @@ static void link_up_cb(void *p)   { (void)p; }
 static void link_down_cb(void *p) { (void)p; }
 
 /*
- * Unlike the RP2040 target's dhcp_bringup() (which drives
- * ioLibrary_Driver's DHCP state machine directly), lwipInit() starts
- * DHCP as a side effect of NET_ADDRESS_DHCP and returns immediately --
- * the actual lease negotiation happens asynchronously in lwIP's tcpip
- * thread. So the "wait up to N seconds" loop here just polls
- * dhcp_supplied_address() rather than driving a state machine itself.
- * On timeout, lwipReconfigure() to NET_ADDRESS_STATIC does the actual
- * "stop DHCP, apply static values" work (see lwipthread.c's
- * do_reconfigure()) -- there's no separate fallback path to write,
- * same as the RP2040 target's "not overwriting net_info is the
- * fallback" logic.
+ * lwipInit() starts DHCP as a side effect of NET_ADDRESS_DHCP and
+ * returns immediately -- the actual lease negotiation happens
+ * asynchronously in lwIP's tcpip thread. So the "wait up to N
+ * seconds" loop here just polls dhcp_supplied_address() rather than
+ * driving a state machine itself. On timeout, lwipReconfigure() to
+ * NET_ADDRESS_STATIC does the actual "stop DHCP, apply static
+ * values" work (see lwipthread.c's do_reconfigure()).
  */
 static void network_bringup(void)
 {
@@ -93,14 +98,11 @@ static void katcp_out_to_socket(void *user, const char *data, size_t len)
 }
 
 /*
- * One client at a time, same as the RP2040 target (see
- * IMPLEMENTATION.md \u00a75.5) -- this is a shape difference from that
- * target's single polling superloop, though: lwIP's blocking socket
- * calls are the natural fit for a ChibiOS thread, so the KATCP server
- * runs as its own thread here rather than a state machine polled from
- * main(). common/'s katcp_proto.c and katcp_commands.c don't care
- * either way -- they only see katcp_feed() calls and an output
- * callback, identically on both targets.
+ * One client at a time (IMPLEMENTATION.md §5.4): lwIP's blocking
+ * socket calls are the natural fit for a ChibiOS thread, so the KATCP
+ * server runs as its own thread here. common/'s katcp_proto.c and
+ * katcp_commands.c don't know or care -- they only ever see
+ * katcp_feed() calls and an output callback.
  */
 static THD_WORKING_AREA(wa_katcp_thread, 2048);
 static THD_FUNCTION(katcp_thread, arg)
@@ -136,9 +138,8 @@ static THD_FUNCTION(katcp_thread, arg)
             }
             katcp_feed(&ctx, rx_scratch, (size_t)got);
             if (katcp_halt_requested) {
-                /* Same open question as the RP2040 target: "halt"
-                 * doesn't yet have a project-specific meaning beyond
-                 * dropping the connection. See IMPLEMENTATION.md \u00a74. */
+                /* "halt" doesn't yet have a project-specific meaning
+                 * beyond dropping the connection -- see IMPLEMENTATION.md §4. */
                 katcp_halt_requested = 0;
                 break;
             }
@@ -153,6 +154,7 @@ int main(void)
     chSysInit();
 
     network_bringup();
+    rtc_sync_start(&ntp_server_ip);
     synth_init();
     portab_setup();
 
@@ -160,8 +162,8 @@ int main(void)
                        NORMALPRIO, katcp_thread, NULL);
 
     /* Heartbeat -- main() becomes the idle-priority loop once its
-     * setup work is done, same role the RP2040 target's superloop
-     * plays, just visibly blinking here instead of polling a socket. */
+     * setup work is done; just blinks the board LED as a simple
+     * still-alive indicator. */
     while (true) {
         palToggleLine(PORTAB_LINE_LED1);
         chThdSleepMilliseconds(500);
