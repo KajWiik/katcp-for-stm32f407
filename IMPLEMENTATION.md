@@ -304,8 +304,8 @@ of the command table.
   `!sensor-list ok <count>`
 - **Inform format:** `#sensor-list <name> <description> <units> <type> [min max]`
   — `min`/`max` are appended for `integer`- and `float`-typed sensors
-  (for `float`, formatted as fixed-point decimal text — see §6.2, not
-  raw scaled-integer units)
+  (for `float`, formatted with `%.*f` from a genuine `double` — see
+  §6.2)
 - **With argument:** single matching inform + `!sensor-list ok 1`, or
   `!sensor-list fail unknown sensor`
 - **Currently defined sensors:**
@@ -314,7 +314,7 @@ of the command table.
   |---|---|---|---|---|
   | `synth.locked` | boolean | *(none)* | 0–1 | `synth_is_locked()` |
   | `board.uptime` | integer | seconds | 0–INT64_MAX | `platform_now_ms()/1000` |
-  | `mcu.temperature` | float | degrees_C | −40–125 | `platform_mcu_millidegrees_c()` (§6.2) |
+  | `mcu.temperature` | float | degrees_C | −40–125 | `platform_mcu_temperature_c()` (§6.2) |
 
 - **Example:**
   ```
@@ -442,25 +442,148 @@ to talk to this box at once.
 it just toggles the board LED every 500 ms as a simple "still alive"
 indicator, separate from and not required by the KATCP protocol itself.
 
+### 5.6 Build status: compiles and links cleanly against the real toolchain
+
+Every previous claim in this document about "compiles" for this target
+was necessarily aspirational — no `arm-none-eabi-gcc` toolchain was
+available while most of this was written. Once one became available,
+`make -j4` was actually run against this target, from a clean tree
+(submodule at the exact pinned commit, `ext/lwip-2.1.2.7z` extracted),
+and — after one real fix — it succeeds completely:
+`build/katcp_stm32_e407.elf`/`.hex`/`.bin` all produced.
+
+**The one real problem found, unrelated to anything float/FPU:** the
+final link failed with undefined references to `_write`, `_sbrk`,
+`_read`, `_close`, `_lseek`, `_exit`, `_kill`, `_getpid`, `_fstat`,
+`_isatty` — newlib's own reentrant wrappers (`_write_r` etc., in
+`libg.a`) are thin shims that call these plain, non-reentrant versions,
+which nothing in this project had ever supplied. This is a standard
+bare-metal newlib bring-up gap, not something introduced by any recent
+change — it was simply never triggered before because this was the
+project's first real link attempt. Fixed by adding
+`$(CHIBIOS)/os/various/newlib_bindings/syscalls.c` to `CSRC`
+(Makefile) — ChibiOS's own file for exactly this purpose, supplying
+the reentrant versions directly (`_sbrk_r` genuinely backed by
+ChibiOS's own heap via `chCoreAllocFromBase`, not a dummy stub) rather
+than the plain ones newlib expects, which preempts the archive members
+that caused the undefined references in the first place.
+
+**Resulting image, for reference:**
+
+| | Size | Note |
+|---|---|---|
+| `.text` (flash) | 99,328 B | ~9.5% of the F407's 1 MB flash |
+| `.data` + `.bss` (RAM) | 131,072 B | ~66% of the F407's 192 KB SRAM |
+
+The RAM figure looks large at a glance but breaks down into
+legitimate, expected consumers, not a leak or misconfiguration
+(checked via `arm-none-eabi-nm --size-sort`, not assumed): lwIP's
+`PBUF_POOL` (~9.7 KB), the ChibiOS core heap backing `_sbrk_r` above
+(~8.2 KB, matching `MEM_SIZE=8192` in `cfg/lwipopts.h` exactly), the
+Ethernet MAC's DMA rx/tx buffers (~8.4 KB combined,
+`STM32_MAC_RECEIVE_BUFFERS`/`TRANSMIT_BUFFERS` in `cfg/mcuconf.h`),
+and per-thread stacks including `wa_katcp_thread` (2.4 KB). ~66 KB of
+SRAM remains free — comfortable for now, worth watching if
+significantly more gets added later (a real synth driver, more
+sensors, a second client, etc.) but not a concern today.
+
+**Still not verified:** actually flashing and running this on real
+hardware. A clean build is a real, meaningful checkpoint — it confirms
+every source file, every config flag, and the whole dependency chain
+are internally consistent — but it says nothing about runtime
+behavior (PHY bring-up, RTC/SNTP actually working, ADC readings being
+sane, etc.). That's the next real test, not this one.
+
+**FPU on vs. off, measured, not assumed** (prompted by a direct
+question about whether the RAM figure above already includes
+`USE_FPU=hard` — confirmed yes, via `arm-none-eabi-readelf -A`
+showing `Tag_ABI_VFP_args: VFP registers`). A real side-by-side build
+with `USE_FPU=no` (`make USE_FPU=no BUILDDIR=./build_nofpu`):
+
+| | `USE_FPU=hard` | `USE_FPU=no` |
+|---|---|---|
+| `.text` (flash) | 99,328 B | 99,760 B (432 B *more*) |
+| `.data`+`.bss` (RAM) | 131,072 B | 131,072 B (identical) |
+
+See §6.1 for what this comparison does and doesn't tell you — static
+image size is unaffected either way, but that's not the full FPU cost
+story.
+
 ---
 
 ## 6. Synth driver contract (`common/include/synth.h` / `common/src/synth_stub.c`)
 
-### 6.1 Why integers, not floats
+### 6.1 Floats are now used deliberately -- this reverses an earlier decision
 
-Both the synth driver contract and the sensor table (§4) deliberately
-avoid `float`/`double` anywhere in the wire-facing code. The STM32F407
-does have a hardware FPU (Cortex-M4F), but this project doesn't use it
-(`USE_FPU = no` in the Makefile) — the reasons are independent of
-whether an FPU is present: `printf`-style `%f` formatting isn't
-reliably linked in by the newlib-nano C library configuration common
-in embedded toolchains (it can silently emit garbage or fail to link
-depending on build flags), and integer arithmetic keeps behavior
-simple and deterministic regardless of chip. `?synth-frequency` uses
-integer Hz; sensor timestamps are integer Unix seconds; `board.uptime`
-is integer seconds. If a genuinely fractional value is ever needed,
-prefer a scaled integer (e.g. millidegrees, or Hz instead of GHz) over
-introducing a float type.
+**This project originally avoided `float`/`double` everywhere** in
+favor of scaled integers (e.g. millidegrees) with hand-rolled
+fixed-point text formatting. That decision has been reversed, and
+it's worth recording both the original reasoning and why it changed,
+rather than quietly rewriting history.
+
+**The original reasoning (no longer the operative one):** the
+STM32F407 has a hardware FPU (Cortex-M4F), but early on this project
+didn't use it (`USE_FPU = no`), out of general caution that `printf`
+`%f` support isn't reliably linked in by the newlib-nano C library
+configuration common in embedded toolchains.
+
+**Why it changed:** two things. First, the synth loop-setup math this
+project actually needs to implement -- charge-pump current and
+VCO-tuning-curve selection for `?synth-frequency` (§6.3) -- genuinely
+benefits from real floating point rather than being forced through
+fixed-point arithmetic. Second, and more directly: the newlib-nano
+concern was **checked against this project's actual build, not just
+assumed** -- this Makefile never sets `--specs=nano.specs` anywhere
+(confirmed by grepping ChibiOS's own build rules), so full newlib is
+what's actually linked, and full newlib's `%f` support works with no
+special linker flags needed. The caution that justified avoiding
+floats didn't actually apply to this specific toolchain configuration.
+
+**What changed as a result:**
+- `targets/stm32-e407/Makefile`: `USE_FPU = hard` (was `no`) -- real
+  hardware FPU instructions, hard-float ABI. The accepted cost is a
+  larger FPU register bank (`S0`-`S31` + `FPSCR`) saved/restored on
+  every context switch for any thread touching floating point, judged
+  reasonable for this application. **This is a dynamic, per-context-
+  switch stack cost, not a static image-size cost** -- worth being
+  precise about the distinction, since it's easy to conflate the two.
+  A real side-by-side build (§5.6) confirmed `.bss`/`.data` are
+  byte-for-byte identical between `USE_FPU=hard` and `USE_FPU=no`, and
+  flash is actually *smaller* with the FPU on (native instructions are
+  more compact than software float-emulation routines) -- neither of
+  which the "register bank cost" framing above should be read as
+  contradicting. What that comparison can't see is ARM's lazy FPU
+  stacking (`S16`-`S31` pushed onto a thread's own stack on certain
+  exception entries), which doesn't show up as a static `.bss` size
+  difference because `THD_WORKING_AREA()` sizes are fixed arrays
+  sized by whatever literal was passed in, not auto-grown for FPU
+  margin. None of this project's current code exercises the FPU
+  inside an interrupt-adjacent context enough to matter, so it's not
+  a live problem today -- but it's a real question to actually check
+  (ChibiOS's `CH_DBG_FILL_THREADS` stack high-water-mark
+  instrumentation, or computing the worst-case lazy-stack frame
+  directly) once the synth loop-setup math (§6.3) is written and
+  genuinely uses the FPU from within `katcp_thread`, rather than
+  assumed fine because a comparison that structurally couldn't detect
+  it came back clean.
+- `sensor.h`'s `SENSOR_FLOAT` sensors now hold a genuine `double` (via
+  a `sensor_value_t` union alongside the `int64_t` used for
+  `SENSOR_INTEGER`/`SENSOR_BOOLEAN`), formatted with plain `%.*f` --
+  see §6.2. The old `scale`-field/`format_fixed()` scaled-integer
+  machinery is gone.
+- `platform_mcu_millidegrees_c()` became `platform_mcu_temperature_c()`,
+  returning degrees Celsius directly as a `double` -- see §6.2.
+- `?synth-frequency`'s eventual real implementation (§6.3, still
+  stubbed) is now free to use real floating-point arithmetic for the
+  charge-pump/VCO-curve math rather than being constrained to
+  fixed-point.
+
+**What's unchanged:** `?synth-frequency` and `?synth-write-register`
+still use integer Hz / a raw 24-bit integer word on the wire --
+frequency and raw register values are naturally integer quantities
+regardless of the FPU question, this reversal is specifically about
+where genuine floating-point *math* or *display* is needed, not a
+blanket "use floats everywhere now."
 
 Three functions, chip-agnostic by design:
 
@@ -483,42 +606,43 @@ until the chip and its wiring to this board are chosen.
 ### 6.2 `mcu.temperature` — the first `SENSOR_FLOAT` sensor
 
 KATCP's spec defines a real `float` sensor type alongside
-`integer`/`boolean`/etc. — nothing about the protocol itself is
-integer-only, that was purely this project's own choice (§6.1). Once
-a genuinely continuous quantity showed up (die temperature), it was
-worth actually exposing `SENSOR_FLOAT` as a type rather than quietly
-reporting a temperature as `SENSOR_INTEGER` with `units="millidegrees_C"`
-and letting the client guess.
+`integer`/`boolean`/etc. Once a genuinely continuous quantity showed
+up (die temperature), it was worth actually exposing `SENSOR_FLOAT` as
+a type rather than quietly reporting a temperature as `SENSOR_INTEGER`
+with `units="millidegrees_C"` and letting the client guess.
 
-**Still no C `float`/`double` anywhere, though — `SENSOR_FLOAT` is
-represented internally as a scaled integer, same as before, just with
-fixed-point decimal *text* formatting at the point of emission.** Each
-`sensor_def_t` gets a `scale` field (must be a positive power of 10 —
-`1000` for millidegrees, giving 3 decimal places); `sensor.c`'s
-`format_fixed()` converts a raw scaled integer (e.g. `23456`) to text
-(`"23.456"`) via pure integer division/modulo, applied to both
-`?sensor-value`'s value and `?sensor-list`'s `min`/`max` for
-`SENSOR_FLOAT` sensors. `%f` is never touched. The negative-value case
-(`whole`/`frac` split done on the *magnitude*, sign prepended
-separately, using a negate-then-add-1 construction so it's correct —
-not just "doesn't crash" — even for `INT64_MIN`) was verified against
-10 hand-picked cases including the specific pitfall named when this
-design was first discussed (a naive `abs()`-based split turning
-`-5.234` into `-5.-234`).
+**`SENSOR_FLOAT` now holds a genuine C `double`** (§6.1) — `sensor_def_t`
+has a `sensor_value_t min, max` (a union of `int64_t i` / `double f`,
+selected by the sensor's `type`) and an `int decimals` field used
+directly as `%.*f`'s precision argument, e.g. `decimals=3` → `"23.456"`.
+`sensor.c`'s `emit_sensor_list_entry()`/`emit_sensor_value_entry()`
+format `SENSOR_FLOAT` values and `min`/`max` with plain
+`snprintf(..., "%.*f", s->decimals, value)` — no hand-rolled
+fixed-point arithmetic. Verified after the change (not just assumed to
+still work): compiled and run on the host with a deliberately negative
+fake temperature (`-12.3456`), confirming standard `%.*f` handles the
+sign and rounds correctly (`"-12.346"`) — the exact case the old
+hand-rolled formatter needed a negate-then-add-1 trick to get right,
+now handled by the standard library instead of custom logic.
 
 **The sensor itself:** `mcu.temperature`, backed by
-`platform_mcu_millidegrees_c()` (new `platform.h` contract function,
-implemented for real in `targets/stm32-e407/src/platform_chibios.c`;
-the desktop test build stubs it to a fixed fake value, same pattern as
+`platform_mcu_temperature_c()` (`platform.h` contract function,
+returning degrees Celsius as a `double`; implemented for real in
+`targets/stm32-e407/src/platform_chibios.c`, stubbed to a fixed fake
+value in the desktop test build, same pattern as
 `platform_wallclock_unix_s()`). Reads the STM32F407's internal
 temperature sensor via ADC1 channel 16 (`ADC_CHANNEL_SENSOR`) — no
 GPIO setup needed, it's a purely internal channel, unlike a regular
-ANx pin. `HAL_USE_ADC`/`STM32_ADC_USE_ADC1` are now `TRUE` in
+ANx pin. `HAL_USE_ADC`/`STM32_ADC_USE_ADC1` are `TRUE` in
 `cfg/halconf.h`/`cfg/mcuconf.h`. The ADC group config (sample time
 `ADC_SAMPLE_144` for the sensor channel specifically) is modeled
 directly on ChibiOS's own `testhal/STM32/STM32F4xx/ADC/main.c`
 example, which demonstrates this exact channel — not derived from
-scratch.
+scratch. The V25/Avg_Slope-to-temperature conversion itself is now
+plain double arithmetic (`(v_sense_v - 0.76) / 0.0025 + 25.0`) —
+noticeably more readable than the old scaled-integer version, a small
+side benefit of §6.1's reversal beyond the synth math it was mainly
+made for.
 
 **Accuracy: deliberately uncalibrated, and worth being honest about
 how rough that is.** The conversion uses the STM32F407 datasheet's
@@ -560,13 +684,13 @@ says nothing about how to compute it for an arbitrary next frequency.
 implemented, and doing so is a real, separate piece of work** — port
 the frequency-to-register-set math (N-divider calculation, VCO-curve
 selection, charge-pump-current lookup) from wherever that logic
-currently lives (PLLatinumSim), not just wire up a stub. Whether that
-math needs anything beyond integer/fixed-point arithmetic (§6.1) is a
-question for when that work is actually undertaken, not answered
-speculatively here — charge-pump current and curve-boundary lookups
-are very plausibly tractable as integer/table-lookup logic, but that's
-an assessment for whoever ports the real algorithm, not a
-conclusion to bake in ahead of seeing what it actually requires.
+currently lives (PLLatinumSim), not just wire up a stub. This is
+precisely the math that motivated enabling the FPU and switching to
+real floating point (§6.1) — whether the actual port ends up using
+it throughout, or only in places, is still a question for whoever
+does that work, not answered speculatively here; the point of §6.1's
+reversal was removing the *constraint* against using floats, not
+deciding in advance exactly where they'll be used.
 
 **Practical consequence:** get the one-request-per-register path
 working first (§4, §10) since it's foolproof and immediately useful

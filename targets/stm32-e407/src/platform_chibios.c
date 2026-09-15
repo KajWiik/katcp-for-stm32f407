@@ -27,7 +27,7 @@ uint32_t platform_wallclock_unix_s(void)
     return rtc_sync_unix_time();
 }
 
-int64_t platform_mcu_millidegrees_c(void)
+double platform_mcu_temperature_c(void)
 {
     /* Group config modeled directly on ChibiOS's own STM32F4xx ADC
      * testhal example (testhal/STM32/STM32F4xx/ADC/main.c), which
@@ -63,10 +63,15 @@ int64_t platform_mcu_millidegrees_c(void)
      * factory-calibration address/format was confirmed for this
      * specific part, so this doesn't guess at one). V25 = 0.76V,
      * Avg_Slope = 2.5mV/°C, Vref+ assumed 3.3V nominal (not read from
-     * VREFINT), 12-bit ADC (4095 full scale). All-integer arithmetic
-     * throughout -- see sensor.h on why floats are avoided here. */
-    int64_t v_sense_uv    = ((int64_t)sample * 3300000) / 4095;
-    int64_t millidegrees_c = ((v_sense_uv - 760000) * 1000) / 2500 + 25000;
+     * VREFINT), 12-bit ADC (4095 full scale).
+     *
+     * Real double arithmetic now (see sensor.h/platform.h on the FPU
+     * reversal) -- this is measurably simpler to read than the old
+     * scaled-integer version was, which is itself a small point in
+     * favor of the change beyond just the synth math it was mainly
+     * made for. */
+    double v_sense_v = (double)sample * 3.3 / 4095.0;
+    double temp_c     = (v_sense_v - 0.76) / 0.0025 + 25.0;
 
-    return millidegrees_c;
+    return temp_c;
 }

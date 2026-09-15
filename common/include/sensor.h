@@ -4,17 +4,24 @@
 #include <stdint.h>
 #include "katcp_proto.h"
 
-/* Wire-level values stay integer or boolean -- SENSOR_FLOAT below is
- * still represented internally as a scaled integer (see `scale` on
- * sensor_def_t) and formatted by hand as fixed-point decimal text; it
- * is never a C `float`/`double` and never goes through `%f`. See
- * IMPLEMENTATION.md §6.1/§6.2 for why: not an FPU-availability issue,
- * it's about %f/newlib formatting reliability and keeping arithmetic
- * simple and deterministic. */
+/* SENSOR_FLOAT uses a genuine C `double` -- this project used to
+ * avoid float/double everywhere (scaled integers + hand-rolled
+ * fixed-point text formatting instead) mainly over concern that
+ * printf's `%f` isn't reliably linked in by newlib-nano. That
+ * concern doesn't apply to this project's actual build: it doesn't
+ * use `--specs=nano.specs` anywhere (checked directly in the
+ * Makefile/ChibiOS build rules, not assumed), so full newlib with
+ * working `%f` is what's actually linked. Combined with the synth
+ * loop-setup math (IMPLEMENTATION.md §6.3) genuinely benefiting from
+ * real floating point, the FPU is now enabled (targets/stm32-e407/
+ * Makefile, USE_FPU=hard) and SENSOR_FLOAT reads/reports real
+ * doubles, formatted via `%.*f`. See IMPLEMENTATION.md §6.1 for the
+ * full history of this reversal -- it's a reversal, not something
+ * pretended to have been the design from the start. */
 typedef enum {
     SENSOR_BOOLEAN,
     SENSOR_INTEGER,
-    SENSOR_FLOAT,   /* KATCP "float" type; scaled-integer internally, see above */
+    SENSOR_FLOAT,
 } sensor_type_t;
 
 typedef enum {
@@ -24,21 +31,28 @@ typedef enum {
     SENSOR_STATUS_ERROR,
 } sensor_status_t;
 
-/* Reads the current value into *out_value (0/1 for SENSOR_BOOLEAN;
- * for SENSOR_FLOAT, the value scaled by `scale` below -- e.g.
- * millidegrees for a scale of 1000). Must not block. Returns the
+/* Which union member a sensor_read_fn fills in is determined by the
+ * sensor_def_t's `type` -- SENSOR_BOOLEAN/SENSOR_INTEGER use `.i`,
+ * SENSOR_FLOAT uses `.f`. */
+typedef union {
+    int64_t i;
+    double  f;
+} sensor_value_t;
+
+/* Fills in *out (the `.i` or `.f` member matching the sensor's own
+ * type -- see sensor_value_t above). Must not block. Returns the
  * sensor's current status. */
-typedef sensor_status_t (*sensor_read_fn)(int64_t *out_value);
+typedef sensor_status_t (*sensor_read_fn)(sensor_value_t *out);
 
 typedef struct {
     const char     *name;         /* e.g. "synth.locked" */
     const char     *description;  /* e.g. "Synthesizer PLL lock status" */
     const char     *units;        /* "" if dimensionless */
     sensor_type_t   type;
-    int64_t         min, max;     /* meaningful for SENSOR_INTEGER and SENSOR_FLOAT (raw/scaled units) */
-    int64_t         scale;        /* SENSOR_FLOAT only: raw units per 1.0 of the displayed
-                                      value, e.g. 1000 for millidegrees -> "23.456". Must be
-                                      a positive power of 10. Unused (0) for other types. */
+    sensor_value_t  min, max;     /* meaningful for SENSOR_INTEGER (.i) and SENSOR_FLOAT (.f); unused for SENSOR_BOOLEAN */
+    int             decimals;     /* SENSOR_FLOAT only: decimal places for %.*f formatting
+                                      of both the value and min/max, e.g. 3 -> "23.456".
+                                      Unused for other types. */
     sensor_read_fn  read;
 } sensor_def_t;
 

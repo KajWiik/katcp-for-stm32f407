@@ -51,10 +51,15 @@ ifeq ($(USE_EXCEPTIONS_STACKSIZE),)
   USE_EXCEPTIONS_STACKSIZE = 0x400
 endif
 
-# No FPU use anywhere in this project -- see IMPLEMENTATION.md \u00a76.1 on
-# why the shared common/ code deliberately avoids float/double.
+# Hardware FPU enabled -- the synth loop-setup math (charge-pump
+# current / VCO tuning-curve selection, IMPLEMENTATION.md section 6.3)
+# benefits enough from real floating point that the Cortex-M4F's
+# single-precision FPU is worth using; the per-thread context-switch
+# cost of the FPU register bank is accepted as reasonable for this
+# application. "hard" selects the hard-float ABI (arguments passed in
+# FPU registers), matching -mfpu=fpv4-sp-d16 below.
 ifeq ($(USE_FPU),)
-  USE_FPU = no
+  USE_FPU = hard
 endif
 
 ifeq ($(USE_FPU_OPT),)
@@ -114,7 +119,18 @@ LDSCRIPT= $(STARTUPLD)/STM32F407xG.ld
 
 # C sources that can be compiled in ARM or THUMB mode depending on the
 # global setting.
+# newlib_bindings/syscalls.c: newlib's own _write_r/_read_r/etc. (the
+# reentrant wrappers libg.a actually calls) are thin shims expecting
+# the target to supply plain _write/_read/etc. -- undefined references
+# to those otherwise fail the final link. ChibiOS ships this file
+# specifically to supply the reentrant versions directly instead
+# (_sbrk_r genuinely backed by ChibiOS's own heap, chCoreAllocFromBase
+# -- CH_CFG_USE_HEAP is TRUE in cfg/chconf.h -- not a dummy stub),
+# which preempts ever needing newlib's own versions at all. Not
+# previously included; found and fixed via a real build against this
+# target, not assumed to be needed in advance.
 CSRC = $(ALLCSRC) \
+       $(CHIBIOS)/os/various/newlib_bindings/syscalls.c \
        src/portab.c \
        src/platform_chibios.c \
        src/rtc_sync.c \

@@ -1,0 +1,13 @@
+# Build artifacts (targets/stm32-e407/Makefile: BUILDDIR=./build, DEPDIR=./.dep;
+# same pattern for any future target added under targets/).
+targets/*/build/
+targets/*/.dep/
+
+# Julia package manifests -- not committed for a package (as opposed to
+# an application): julia/KatcpClient/Project.toml's [compat] bounds are
+# what consumers should resolve against, not a manifest pinned to
+# whichever environment last ran `Pkg.instantiate()` here.
+julia/**/Manifest.toml
+
+# Editor/OS cruft
+.DS_Store
