@@ -22,3 +22,9 @@ bool synth_is_locked(void)
 {
     return false;
 }
+
+bool synth_write_raw_register(uint32_t word24)
+{
+    (void)word24;
+    return false; /* not implemented yet */
+}

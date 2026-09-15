@@ -24,4 +24,16 @@ uint64_t platform_now_ms(void);
  * this to return 0. */
 uint32_t platform_wallclock_unix_s(void);
 
+/* STM32F407 on-die temperature, in millidegrees Celsius, via the
+ * chip's internal ADC channel. Uncalibrated -- uses datasheet TYPICAL
+ * V25/Avg_Slope values, not a per-chip TS_CAL1 factory calibration
+ * (see IMPLEMENTATION.md §6.2 for why: no verified TS_CAL1
+ * address/format was confirmed for this specific part, so this
+ * doesn't guess at one). Treat this as a rough die-temperature
+ * indicator, not a calibrated ambient thermometer. Any future target
+ * without this capability should stub it; there's currently only one
+ * real target (targets/stm32-e407/src/platform_chibios.c) plus a
+ * fixed fake value for desktop tests (test/platform_host.c). */
+int64_t platform_mcu_millidegrees_c(void);
+
 #endif /* PLATFORM_H */

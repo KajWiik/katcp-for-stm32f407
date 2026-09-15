@@ -25,3 +25,12 @@ uint32_t platform_wallclock_unix_s(void)
      * sensor.c's timestamp field with a plausible non-zero value. */
     return (uint32_t)time(NULL);
 }
+
+int64_t platform_mcu_millidegrees_c(void)
+{
+    /* No real ADC/chip to read on a desktop host -- a fixed plausible
+     * value, purely to exercise sensor.c's SENSOR_FLOAT formatting
+     * path in host tests. Not a stand-in for platform_chibios.c's
+     * real ADC-based reading. */
+    return 23456; /* 23.456 C */
+}

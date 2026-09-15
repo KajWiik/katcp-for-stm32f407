@@ -1,0 +1,15 @@
+# This file is machine-generated - editing it directly is not advised
+
+julia_version = "1.12.7"
+manifest_format = "2.0"
+project_hash = "564e8f0bf28bef57734da889fd4d92e1b6813298"
+
+[[deps.KatcpClient]]
+deps = ["Sockets"]
+path = "."
+uuid = "dadfb9b7-f101-434e-8125-b201a10c1817"
+version = "0.1.0"
+
+[[deps.Sockets]]
+uuid = "6462fe0b-24de-5631-8697-dd941f90decc"
+version = "1.11.0"

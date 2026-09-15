@@ -42,12 +42,12 @@ common/                      -- shared, no RTOS/HAL dependency
     katcp_commands.h   Command table declaration + halt flag
     synth.h            Fixed contract for the synth driver
     sensor.h           Fixed contract for the sensor table + handlers
-    platform.h         Monotonic + wall-clock time abstraction (target vs. host builds)
+    platform.h         Monotonic + wall-clock time + MCU temperature abstraction (target vs. host builds)
   src/
     katcp_proto.c      Framing, escaping, tokenizing, dispatch
     katcp_commands.c   Command table and handler implementations
     synth_stub.c       Placeholder synth driver (always reports failure)
-    sensor.c           Sensor table (synth.locked, board.uptime) + handlers
+    sensor.c           Sensor table (synth.locked, board.uptime, mcu.temperature) + handlers
 targets/
   stm32-e407/               -- see §5 and its own README.md
     src/
@@ -59,6 +59,10 @@ targets/
     Makefile
 test/
   platform_host.c      platform.h implementation for desktop tests (§8)
+julia/
+  KatcpClient/         General-purpose KATCP client package (§10.1)
+  load_register_dump.jl  LMX2594 register-dump replay tool (§10.2)
+  test_fixtures/       Real register-dump data used to test the above
 ```
 
 The dependency direction is strict and one-way:
@@ -183,7 +187,7 @@ reply here, not silence. On a match, the handler is called directly
 
 ## 4. Available commands
 
-All eight requests currently implemented, in `katcp_commands.c`. Every
+All nine requests currently implemented, in `katcp_commands.c`. Every
 handler replies exactly once, as KATCP requires.
 
 ### `?halt`
@@ -228,9 +232,10 @@ Lists available requests, or describes one.
   #help help Describe available requests.
   #help synth-frequency Set synth output frequency in Hz.
   #help synth-locked Report synth PLL lock status (0/1).
+  #help synth-write-register Write one raw 24-bit synth register word.
   #help sensor-list List available sensors, or describe one.
   #help sensor-value Report current sensor value(s).
-  !help ok 8
+  !help ok 9
   ```
 
 ### `?synth-frequency <hz>`
@@ -251,6 +256,39 @@ Lists available requests, or describes one.
 - **Current status:** always reports `0` (unlocked), since
   `synth_is_locked()` is stubbed.
 
+### `?synth-write-register <word24>`
+**Custom, non-core request.** Writes one raw 24-bit register word
+verbatim — the one-request-per-register path for replaying a
+precomputed register dump (e.g. from PLLatinumSim), as opposed to
+`?synth-frequency`'s "compute everything from a target frequency"
+approach. See §6.3 for why these are genuinely different problems, not
+two ways of doing the same thing, and §10 for the Julia tooling built
+to drive this one.
+- **Args:** exactly one, a 24-bit integer (hex `0x...` or decimal —
+  `strtoul(..., 0)` auto-detects)
+- **Reply (bad argument count):** `!synth-write-register invalid usage: ?synth-write-register <24bit-value>`
+- **Reply (out of range):** `!synth-write-register invalid value must be a 24-bit integer (0x000000-0xFFFFFF)`
+- **Reply (in range, but driver rejects it):** `!synth-write-register fail synth register write failed`
+- **Reply (success):** `!synth-write-register ok`
+- **Current status:** always replies `fail`, same placeholder reason
+  as `?synth-frequency` — `synth_write_raw_register()` in
+  `synth_stub.c` isn't implemented yet.
+- **On the wire format:** `word24` is bits `[23:16]` = register
+  address, bits `[15:0]` = data — exactly the raw SPI word an
+  LMX2594-style part expects, and exactly what a register-dump export
+  file already contains per line (e.g. `R112\t0x700000`). No
+  interpretation happens beyond range-checking; the client is
+  responsible for getting the value right.
+- **Pipelining:** each write is a separate request, but nothing stops
+  a client from sending many in one `send()`/one `recv()`-sized chunk,
+  each tagged with a distinct `[mid]` — the tokenizer already handles
+  multiple complete requests arriving in a single `katcp_feed()` call
+  in strict order (§3.3), so this needs no server-side support beyond
+  what already exists. This matters for register dumps specifically:
+  LMX2594-style parts require register 0 (which triggers VCO
+  calibration) to be written *last*, and processing order is
+  preserved regardless of which order replies come back in — see §10.
+
 ### Unimplemented request
 Anything not in the table above:
 ```
@@ -265,7 +303,9 @@ of the command table.
 - **No argument:** one `#sensor-list` inform per sensor, then
   `!sensor-list ok <count>`
 - **Inform format:** `#sensor-list <name> <description> <units> <type> [min max]`
-  — `min`/`max` are only appended for `integer`-typed sensors
+  — `min`/`max` are appended for `integer`- and `float`-typed sensors
+  (for `float`, formatted as fixed-point decimal text — see §6.2, not
+  raw scaled-integer units)
 - **With argument:** single matching inform + `!sensor-list ok 1`, or
   `!sensor-list fail unknown sensor`
 - **Currently defined sensors:**
@@ -274,13 +314,15 @@ of the command table.
   |---|---|---|---|---|
   | `synth.locked` | boolean | *(none)* | 0–1 | `synth_is_locked()` |
   | `board.uptime` | integer | seconds | 0–INT64_MAX | `platform_now_ms()/1000` |
+  | `mcu.temperature` | float | degrees_C | −40–125 | `platform_mcu_millidegrees_c()` (§6.2) |
 
 - **Example:**
   ```
   ?sensor-list
   #sensor-list synth.locked Synthesizer PLL lock status \@ boolean
   #sensor-list board.uptime Seconds since boot seconds integer 0 9223372036854775807
-  !sensor-list ok 2
+  #sensor-list mcu.temperature STM32F407 die temperature (uncalibrated ADC estimate) degrees_C float -40.000 125.000
+  !sensor-list ok 3
   ```
   (The `\@` is the empty-argument marker from §3.2 — `synth.locked` has
   no units, so an empty argument is correctly escaped rather than
@@ -312,7 +354,8 @@ Reports current sensor value(s).
   ?sensor-value
   #sensor-value 1789413904 1 synth.locked nominal 0
   #sensor-value 1789413904 1 board.uptime nominal 35
-  !sensor-value ok 2
+  #sensor-value 1789413904 1 mcu.temperature nominal 23.456
+  !sensor-value ok 3
   ```
 
 > **Not implemented:** `?sensor-sampling` (periodic/async sensor
@@ -436,6 +479,100 @@ chip's register map — nothing in `katcp_commands.c` or `katcp_proto.c`
 needs to change. SPI itself isn't even enabled yet in
 `targets/stm32-e407/cfg/mcuconf.h`/`halconf.h` — deliberately deferred
 until the chip and its wiring to this board are chosen.
+
+### 6.2 `mcu.temperature` — the first `SENSOR_FLOAT` sensor
+
+KATCP's spec defines a real `float` sensor type alongside
+`integer`/`boolean`/etc. — nothing about the protocol itself is
+integer-only, that was purely this project's own choice (§6.1). Once
+a genuinely continuous quantity showed up (die temperature), it was
+worth actually exposing `SENSOR_FLOAT` as a type rather than quietly
+reporting a temperature as `SENSOR_INTEGER` with `units="millidegrees_C"`
+and letting the client guess.
+
+**Still no C `float`/`double` anywhere, though — `SENSOR_FLOAT` is
+represented internally as a scaled integer, same as before, just with
+fixed-point decimal *text* formatting at the point of emission.** Each
+`sensor_def_t` gets a `scale` field (must be a positive power of 10 —
+`1000` for millidegrees, giving 3 decimal places); `sensor.c`'s
+`format_fixed()` converts a raw scaled integer (e.g. `23456`) to text
+(`"23.456"`) via pure integer division/modulo, applied to both
+`?sensor-value`'s value and `?sensor-list`'s `min`/`max` for
+`SENSOR_FLOAT` sensors. `%f` is never touched. The negative-value case
+(`whole`/`frac` split done on the *magnitude*, sign prepended
+separately, using a negate-then-add-1 construction so it's correct —
+not just "doesn't crash" — even for `INT64_MIN`) was verified against
+10 hand-picked cases including the specific pitfall named when this
+design was first discussed (a naive `abs()`-based split turning
+`-5.234` into `-5.-234`).
+
+**The sensor itself:** `mcu.temperature`, backed by
+`platform_mcu_millidegrees_c()` (new `platform.h` contract function,
+implemented for real in `targets/stm32-e407/src/platform_chibios.c`;
+the desktop test build stubs it to a fixed fake value, same pattern as
+`platform_wallclock_unix_s()`). Reads the STM32F407's internal
+temperature sensor via ADC1 channel 16 (`ADC_CHANNEL_SENSOR`) — no
+GPIO setup needed, it's a purely internal channel, unlike a regular
+ANx pin. `HAL_USE_ADC`/`STM32_ADC_USE_ADC1` are now `TRUE` in
+`cfg/halconf.h`/`cfg/mcuconf.h`. The ADC group config (sample time
+`ADC_SAMPLE_144` for the sensor channel specifically) is modeled
+directly on ChibiOS's own `testhal/STM32/STM32F4xx/ADC/main.c`
+example, which demonstrates this exact channel — not derived from
+scratch.
+
+**Accuracy: deliberately uncalibrated, and worth being honest about
+how rough that is.** The conversion uses the STM32F407 datasheet's
+*typical* `V25`/`Avg_Slope` values (0.76 V, 2.5 mV/°C), not a
+per-chip factory calibration. The F407 does have a single-point
+calibration value (`TS_CAL1`) in system memory that could correct the
+offset — but no address/format for it was independently verified
+against the actual reference manual for this specific part before
+writing this code, so rather than risk reading the wrong flash address
+or misapplying the format, this implementation just doesn't use it.
+The result should be treated as a rough die-temperature indicator (and
+notably, die temperature, not ambient — self-heating and PCB thermal
+coupling both matter) rather than a calibrated thermometer. Adding
+`TS_CAL1`-based offset correction is a reasonable improvement *once*
+that's confirmed against ST's actual documentation for this part —
+deliberately not attempted speculatively here.
+
+### 6.3 Register dump replay vs. computed frequency — two different problems
+
+`?synth-write-register` (§4) and `?synth-frequency` (§4) look like two
+ways to do the same thing but aren't, and it's worth being explicit
+about why rather than letting that stay implicit.
+
+**`?synth-write-register` is foolproof but not useful for a frequency
+sweep.** It replays an already-computed register set byte-for-byte —
+no interpretation, no math, just range-checked SPI writes. That's
+exactly right for loading a known-good configuration, but useless for
+programming an arbitrary frequency on demand, because getting an
+LMX2594-class part to a specific frequency correctly requires more
+than picking register values for the right N-divider: **the charge
+pump current has to be set correctly for whichever of the part's
+multiple VCO tuning-curve regions the target frequency falls into** —
+get that wrong and the loop either doesn't lock cleanly or locks with
+degraded phase noise. A register dump captures one specific frequency
+that's already had this worked out (by PLLatinumSim or similar); it
+says nothing about how to compute it for an arbitrary next frequency.
+
+**`?synth-frequency` is the right shape for a sweep, but isn't
+implemented, and doing so is a real, separate piece of work** — port
+the frequency-to-register-set math (N-divider calculation, VCO-curve
+selection, charge-pump-current lookup) from wherever that logic
+currently lives (PLLatinumSim), not just wire up a stub. Whether that
+math needs anything beyond integer/fixed-point arithmetic (§6.1) is a
+question for when that work is actually undertaken, not answered
+speculatively here — charge-pump current and curve-boundary lookups
+are very plausibly tractable as integer/table-lookup logic, but that's
+an assessment for whoever ports the real algorithm, not a
+conclusion to bake in ahead of seeing what it actually requires.
+
+**Practical consequence:** get the one-request-per-register path
+working first (§4, §10) since it's foolproof and immediately useful
+for loading known-good configurations — which is exactly what's been
+built so far. `?synth-frequency` staying stubbed is a real, open gap
+(§9), not an oversight.
 
 ---
 
@@ -586,3 +723,187 @@ $ nc 192.168.1.200 7147
 - **Single client / no interrupt-driven I/O** — see §5.2, §5.4; fine
   at current scale, worth reconsidering if usage patterns change.
 - **No sensor exposing RTC sync status** — see §7.
+- **`mcu.temperature` has no `TS_CAL1` calibration** — see §6.2; a
+  worthwhile follow-up once the calibration address/format is
+  confirmed against ST's actual reference manual for this part.
+- **`?synth-frequency` still stubbed** — see §6.3. Requires porting
+  the actual frequency-to-register-set math (N-divider, VCO-curve
+  selection, charge-pump-current lookup), not just implementing a
+  formula; `?synth-write-register` (§4, §10) is the interim path for
+  loading known-good configurations.
+
+---
+
+## 10. Julia client tooling (`julia/`)
+
+Two pieces, deliberately separated: a general-purpose KATCP client
+package with no project-specific knowledge, and a small script built
+on it that knows about LMX2594-style register dumps specifically.
+Building the general client first (rather than a one-off script) was
+a deliberate call — the register-dump loader needs to speak the wire
+protocol regardless, and writing that once as a reusable package costs
+the same as a one-off script but doesn't need throwing away the moment
+anything else KATCP-related is wanted from Julia (which, given this
+project, was never realistically going to be a one-time need — even
+just scripting `?sensor-value` polling would have wanted it).
+
+### 10.1 `KatcpClient.jl` — general protocol client
+
+```
+julia/KatcpClient/
+  Project.toml
+  src/KatcpClient.jl
+  test/runtests.jl
+```
+
+A standalone Julia package (own `Project.toml`, own UUID), not
+registered anywhere — used via a relative path or `include()` for now
+(see §10.2). Depends only on the `Sockets` stdlib.
+
+**Escaping and tokenizing are separate, hand-ported implementations of
+the same algorithms as `common/src/katcp_proto.c`** (§3.2, §3.3) —
+not a shared codebase, since one side is C running on the STM32 and
+the other is Julia running on a desktop/control machine. Every
+mapping in `ESCAPE_OUT` corresponds line-for-line to the C escape
+table. Verified in two stages before being trusted:
+1. The algorithm was first prototyped and tested in Python (9 round-trip
+   cases, 6 tokenize cases) purely to validate the logic, before any
+   Julia was written, since no Julia runtime was available in the
+   sandbox this was originally drafted in.
+2. Once real Julia access became available, the actual `.jl` code was
+   tested directly — `test/runtests.jl` re-runs the same escape/
+   tokenize/parse cases against the real implementation (`Pkg.test()`
+   passes, 40 assertions), plus three **live TCP loopback tests**
+   against a fake KATCP server run in a background `@async` task on
+   `localhost`, exercising `request()` (including informs arriving
+   before a reply) and `request_pipeline()` with **deliberately
+   out-of-order server replies** — confirming replies get matched back
+   up by `[mid]` and returned in the original request order regardless
+   of network arrival order, not just asserted to work.
+
+**One real bug caught during this testing, worth recording:**
+`abspath(PROGRAM_FILE) == @__FILE__ && main()` (the standard Julia
+"run main() only if this file is executed directly, not `include`d"
+idiom) is a **parse error** without parenthesizing the macro call —
+`@__FILE__` used inline in a binary-operator chain creates a genuine
+syntax ambiguity. Fixed by parenthesizing: `(@__FILE__)`. Not a
+project-specific mistake so much as a sharp edge in Julia's macro-call
+grammar worth remembering elsewhere.
+
+**Core API:**
+
+| Function | Purpose |
+|---|---|
+| `connect_katcp(host, port=7147)` | Opens a `KatcpConnection` |
+| `request(conn, name, args...)` | Sends one request, blocks for its reply, returns `(reply, informs)` |
+| `request_pipeline(conn, name, arglists)` | Sends many requests back-to-back, returns replies in `arglists` order regardless of reply arrival order (§10.1 above) |
+| `check_ok(reply)` | Throws `KatcpRequestFailed` if `reply.status != "ok"`, otherwise returns it — optional, `request`/`request_pipeline` don't call this automatically |
+| `escape_arg` / `unescape_arg` / `tokenize_line` / `parse_line` | The wire-format primitives, exported in case a caller needs them directly |
+
+`request_pipeline` is the actual solution to "113 individual
+request/reply round-trips would be slow": all requests are written to
+the socket up front (matching how the server's tokenizer already
+handles multiple complete requests arriving in one `recv()`, §3.3),
+and replies are collected and re-sorted back into the caller's
+original order by `[mid]`. Request *transmission* order (and therefore
+the server's SPI *write* order) is still exactly the order given —
+only reply *matching* is order-independent — which is what makes it
+safe for LMX2594-style register dumps that require register 0 (VCO
+calibration trigger) to be written last: passing the file's own order
+straight through to `request_pipeline` preserves that requirement with
+no special-casing needed.
+
+### 10.2 `load_register_dump.jl` — the LMX2594-specific tool
+
+```
+julia/
+  load_register_dump.jl
+  test_fixtures/
+    lmx2594_example.txt        -- the actual 113-register dump this was tested against
+```
+
+Loads a register-dump file via a plain `include()` of `KatcpClient.jl`
+directly (not a formal package dependency — reasonable for a single
+small co-located script; promoting it to a real `Project.toml`
+dependency is a two-line change if this tooling grows).
+
+**`parse_register_dump(path)`** parses lines like `R112\t0x700000`
+into a `Vector{UInt32}`, preserving file order (see §10.1 on why that
+matters), and **cross-checks each line's `R<n>` label against the
+register address actually encoded in the value's own bits `[23:16]`**
+— catching a hand-edited or corrupted dump file before it gets
+anywhere near hardware. Tested against:
+- The actual 113-register dump provided during this project's
+  development (`test_fixtures/lmx2594_example.txt`) — correct count
+  (113), correct first/last values (`R112`=`0x700000` first, `R0`=
+  `0x00251C` last, confirming order preservation), and the
+  label/address cross-check passing silently on all 113 real lines
+  (would have errored otherwise).
+- A deliberately corrupted 2-line fixture (mismatched label vs.
+  encoded address) — confirmed to raise a precise, line-numbered error
+  rather than silently pick one interpretation.
+
+**`program_registers(host, words; port=7147)`** connects, replays
+`words` via `request_pipeline(conn, "synth-write-register", ...)`, and
+returns a `Bool` per register. Run end-to-end against a fake server
+(mimicking the real firmware's exact reply format, including `[mid]`
+tagging) using the real 113-register fixture: all 113 sent, all 113
+replies matched back up correctly, all correctly reporting `fail` —
+matching current firmware exactly, since `synth_write_raw_register()`
+is still stubbed (§6). This is the strongest verification available
+without real hardware: the full parse → connect → pipeline →
+match-and-report path, exercised against the actual data, not
+synthetic test values.
+
+**Not yet run against real firmware** — no hardware to test against
+yet (§6: no synth chip chosen, SPI not wired). First real test is
+naturally whenever `synth_write_raw_register()` gets a real
+implementation.
+
+**Usage:**
+```bash
+julia julia/load_register_dump.jl <host> <hexfile> [port]
+```
+
+### 10.3 Validated against a real, independent KATCP server
+
+Everything in §10.1's live-loopback tests exercises `KatcpClient.jl`
+against a *fake* server written for the test itself — useful, but it
+can't catch a case where this project's own assumptions about the
+protocol and a real implementation's actual behavior diverge, since
+the fake server was written under the same assumptions as the client.
+So, read-only (no `?write`, `?progdev`, `?halt`, or any other
+state-changing request), this was also tested against a genuine,
+independent, unrelated KATCP server: a `tcpborphserver3` instance
+(`katcp-library v0.2.0-304-gccea3d3-dirty`, an RFSoC-class CASPER
+backend, normally driven by `casperfpga`) reachable on the local
+network.
+
+**This caught a real interop bug, not a hypothetical one.** The very
+first `?watchdog[1]` request sent to it hung indefinitely —
+`tcpborphserver3` replied with plain `!watchdog ok`, no `[mid]` at
+all, which `request()`'s original strict `msg.mid == string(mid)`
+match could structurally never satisfy. Root-caused by manually
+reading raw lines off the socket with a bounded timeout rather than
+guessing, which also surfaced something not otherwise obvious: the
+server sends three unsolicited `#version-connect` informs immediately
+on connect, before replying to anything. Fixed in `request()` (§10.1)
+to tolerate a mid-less reply when it's the only request in flight;
+`request_pipeline()` was deliberately left strict, since it has no
+safe way to degrade when multiple requests are genuinely concurrent
+(documented there as a real, known limitation if ever pointed at a
+server like this one).
+
+**After the fix, confirmed working end-to-end**, read-only, against
+the real server: the full `#version-connect` connect banner parsed
+correctly as informs; `?version-list` and `?help` (130 real commands
+enumerated, including a large `rfdc-*` family for the RFSoC's RF Data
+Converter subsystem); `?status`/`?fpgastatus`/`?listdev` correctly
+reporting failure with `#fpga not programmed` informs (the board's
+FPGA isn't currently loaded — a real, accurate device state, not a
+client-side error); `?listbof` (`0`, consistent with the above); and
+`?client-list` showing exactly one connected client — this session
+itself, confirming a genuine live connection rather than a cached
+response.
+
+---

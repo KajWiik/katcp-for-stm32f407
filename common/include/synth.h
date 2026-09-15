@@ -20,4 +20,17 @@ bool synth_set_frequency(uint64_t freq_hz);
  * (Stubbed false-always until wired to real hardware.) */
 bool synth_is_locked(void);
 
+/* Writes one raw 24-bit register word verbatim over SPI -- the exact
+ * on-the-wire format LMX2594-style parts use: bits [23:16] are the
+ * register address, bits [15:0] are the data, R/W bit implicit as a
+ * write. word24 must fit in 24 bits (caller/command layer validates
+ * range; this function assumes it's already checked). This is
+ * deliberately the *only* interpretation applied -- no frequency
+ * math, no charge-pump-current calculation, no VCO-curve awareness.
+ * It exists so a precomputed register dump (e.g. from PLLatinumSim)
+ * can be replayed byte-for-byte, foolproof but not usable for a
+ * frequency sweep -- see IMPLEMENTATION.md for the fuller discussion
+ * of why that's a deliberate, separate problem from ?synth-frequency. */
+bool synth_write_raw_register(uint32_t word24);
+
 #endif /* SYNTH_H */

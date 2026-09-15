@@ -9,13 +9,13 @@ GNU Make + ChibiOS's own build conventions, not CMake.
 ```
 src/
   main.c              -- ChibiOS/lwIP glue: network bring-up, KATCP-over-socket thread
-  platform_chibios.c  -- platform.h implementation (RTC-backed wall clock)
+  platform_chibios.c  -- platform.h implementation (RTC-backed wall clock, ADC-backed die temperature)
   rtc_sync.c          -- SNTP-based RTC sync (boot + every 6h) -- see IMPLEMENTATION.md §7
   portab.c / portab.h -- minimal board hook (LED heartbeat), ChibiOS demo convention
 cfg/
   chconf.h            -- RTOS kernel config (stock ChibiOS template, unmodified)
-  halconf.h           -- HAL subsystem config (PAL + MAC + RTC enabled; USB/SDC/shell dropped)
-  mcuconf.h           -- STM32F4xx peripheral/clock config (LSE-clocked RTC; USB disabled)
+  halconf.h           -- HAL subsystem config (PAL + MAC + RTC + ADC enabled; USB/SDC/shell dropped)
+  mcuconf.h           -- STM32F4xx peripheral/clock config (LSE-clocked RTC, ADC1 enabled; USB disabled)
   lwipopts.h          -- this project's lwIP overrides (DHCP, SNTP, larger heap)
 Makefile
 ```

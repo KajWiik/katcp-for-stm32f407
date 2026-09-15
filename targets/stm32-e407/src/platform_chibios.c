@@ -26,3 +26,47 @@ uint32_t platform_wallclock_unix_s(void)
     }
     return rtc_sync_unix_time();
 }
+
+int64_t platform_mcu_millidegrees_c(void)
+{
+    /* Group config modeled directly on ChibiOS's own STM32F4xx ADC
+     * testhal example (testhal/STM32/STM32F4xx/ADC/main.c), which
+     * demonstrates this exact internal channel -- ADC_SAMPLE_144 for
+     * the sensor channel is theirs, not derived from scratch. No GPIO
+     * setup needed: channel 16 (ADC_CHANNEL_SENSOR) is purely
+     * internal, unlike a regular ANx pin. */
+    static const ADCConversionGroup grpcfg = {
+        .circular     = false,
+        .num_channels = 1,
+        .end_cb       = NULL,
+        .error_cb     = NULL,
+        .cr1          = 0,
+        .cr2          = ADC_CR2_SWSTART,
+        .smpr1        = ADC_SMPR1_SMP_SENSOR(ADC_SAMPLE_144),
+        .smpr2        = 0,
+        .htr          = 0,
+        .ltr          = 0,
+        .sqr1         = 0,
+        .sqr2         = 0,
+        .sqr3         = ADC_SQR3_SQ1_N(ADC_CHANNEL_SENSOR),
+    };
+    adcsample_t sample;
+
+    adcSTM32EnableTSVREFE();
+    adcStart(&ADCD1, NULL);
+    adcConvert(&ADCD1, &grpcfg, &sample, 1);
+    adcStop(&ADCD1);
+    adcSTM32DisableTSVREFE();
+
+    /* Datasheet TYPICAL values, NOT chip-calibrated (see platform.h
+     * and IMPLEMENTATION.md §6.2 for why: no verified TS_CAL1
+     * factory-calibration address/format was confirmed for this
+     * specific part, so this doesn't guess at one). V25 = 0.76V,
+     * Avg_Slope = 2.5mV/°C, Vref+ assumed 3.3V nominal (not read from
+     * VREFINT), 12-bit ADC (4095 full scale). All-integer arithmetic
+     * throughout -- see sensor.h on why floats are avoided here. */
+    int64_t v_sense_uv    = ((int64_t)sample * 3300000) / 4095;
+    int64_t millidegrees_c = ((v_sense_uv - 760000) * 1000) / 2500 + 25000;
+
+    return millidegrees_c;
+}
