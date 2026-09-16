@@ -276,7 +276,10 @@
 /*
  * SPI driver system settings.
  */
-#define STM32_SPI_USE_SPI1                  FALSE
+/* SPI1 used to drive the LMX2594 synth over the Arduino-compatible
+ * header (SCK=PA5, MISO=PA6, MOSI=PB5, CS=PA4 -- manually toggled,
+ * not via this driver's ssline) -- src/synth_lmx2594.c. */
+#define STM32_SPI_USE_SPI1                  TRUE
 #define STM32_SPI_USE_SPI2                  FALSE
 #define STM32_SPI_USE_SPI3                  FALSE
 #define STM32_SPI_SPI1_RX_DMA_STREAM        STM32_DMA_STREAM_ID(2, 0)

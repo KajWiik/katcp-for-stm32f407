@@ -170,7 +170,18 @@
  * @brief   Enables the SPI subsystem.
  */
 #if !defined(HAL_USE_SPI) || defined(__DOXYGEN__)
-#define HAL_USE_SPI                         FALSE
+#define HAL_USE_SPI                         TRUE
+#endif
+
+/*
+ * synth_lmx2594.c (targets/stm32-e407/src/) manages the LMX2594's CS
+ * pin manually (palClearLine()/palSetLine() around each 24-bit word,
+ * matching the device's CSB-framed-word protocol, not a fixed-size
+ * DMA transfer), so the SPI driver's own chip-select handling is not
+ * used -- SPI_SELECT_MODE_NONE removes the ssline/ssport/sspad field(s)
+ * from SPIConfig entirely rather than needing to keep one unused. */
+#if !defined(SPI_SELECT_MODE) || defined(__DOXYGEN__)
+#define SPI_SELECT_MODE                     SPI_SELECT_MODE_NONE
 #endif
 
 /**
