@@ -24,7 +24,12 @@
  *
  * SPI: SPI1, Arduino-compatible header (as given 2026-09-15):
  *   SCK  = PA5 (D13)   MISO = PA6 (D12)
- *   MOSI = PB5 (D11)   CS   = PA4 (D10)
+ *   MOSI = PB5 (D11)   CS   = PA4 (D10)  -- synth 1
+ * Two LMX2594s share this bus (SYNTH_COUNT in synth.h), one CS each.
+ * Synth 2's CS is PB6 -- a PLACEHOLDER, picked only because the
+ * ChibiOS board file leaves it unused; not confirmed against the real
+ * wiring. Both synths are assumed to share the same reference/fPD and
+ * baseline register template below.
  * MUXOUT/lock-detect: not yet wired -- synth_is_locked() returns
  * false unconditionally until LMX_MUXOUT_WIRED is set and a real
  * line substituted in.
@@ -46,7 +51,10 @@
 
 /* ---- CONFIGURE: SPI pins (see header comment above) -------------- */
 #define LMX_SPID          (&SPID1)
-#define LMX_CS_LINE       PAL_LINE(GPIOA, 4U)
+static const ioline_t lmx_cs_lines[SYNTH_COUNT] = {
+    PAL_LINE(GPIOA, 4U),   /* synth 1 */
+    PAL_LINE(GPIOB, 6U),   /* synth 2 -- PLACEHOLDER, see header comment */
+};
 #define LMX_SCK_LINE      PAL_LINE(GPIOA, 5U)
 #define LMX_MISO_LINE     PAL_LINE(GPIOA, 6U)
 #define LMX_MOSI_LINE     PAL_LINE(GPIOB, 5U)
@@ -55,7 +63,10 @@
 /* ---- CONFIGURE: MUXOUT / lock-detect (not yet wired) -------------- */
 #define LMX_MUXOUT_WIRED  0
 #if LMX_MUXOUT_WIRED
-#define LMX_MUXOUT_LINE   PAL_LINE(GPIOx, N)   /* fill in once wired */
+static const ioline_t lmx_muxout_lines[SYNTH_COUNT] = {
+    PAL_LINE(GPIOx, N),   /* synth 1 -- fill in once wired */
+    PAL_LINE(GPIOx, N),   /* synth 2 -- fill in once wired */
+};
 #endif
 
 /* ---- CONFIGURE: reference / phase-detector frequency --------------
@@ -66,7 +77,8 @@
 /* Serializes whole programming sequences: both the KATCP thread and
  * the HTTP thread (web_server.c) can call into this driver, and
  * spiAcquireBus() alone only keeps single 24-bit words intact -- two
- * interleaved frequency changes would mix their register sets. */
+ * interleaved frequency changes would mix their register sets. One
+ * mutex for both synths, since they share the bus anyway. */
 static MUTEX_DECL(lmx_mtx);
 
 /* ====================================================================
@@ -195,7 +207,7 @@ static const SPIConfig lmx_spicfg = {
     .cr2      = 0,
 };
 
-static void lmx_spi_write_word(uint32_t word24)
+static void lmx_spi_write_word(int synth, uint32_t word24)
 {
     uint8_t tx[3] = {
         (uint8_t)(word24 >> 16),
@@ -204,9 +216,9 @@ static void lmx_spi_write_word(uint32_t word24)
     };
 
     spiAcquireBus(LMX_SPID);
-    palClearLine(LMX_CS_LINE);
+    palClearLine(lmx_cs_lines[synth]);
     spiSend(LMX_SPID, 3, tx);
-    palSetLine(LMX_CS_LINE);
+    palSetLine(lmx_cs_lines[synth]);
     spiReleaseBus(LMX_SPID);
 }
 
@@ -220,12 +232,14 @@ void synth_init(void)
     palSetLineMode(LMX_MISO_LINE, PAL_MODE_ALTERNATE(LMX_SPI_AF));
     palSetLineMode(LMX_MOSI_LINE, PAL_MODE_ALTERNATE(LMX_SPI_AF));
 
-    palSetLineMode(LMX_CS_LINE, PAL_MODE_OUTPUT_PUSHPULL);
-    palSetLine(LMX_CS_LINE); /* idle high (deselected) before spiStart() */
-
+    for (int s = 0; s < SYNTH_COUNT; s++) {
+        /* idle high (deselected) before spiStart() */
+        palSetLine(lmx_cs_lines[s]);
+        palSetLineMode(lmx_cs_lines[s], PAL_MODE_OUTPUT_PUSHPULL);
 #if LMX_MUXOUT_WIRED
-    palSetLineMode(LMX_MUXOUT_LINE, PAL_MODE_INPUT);
+        palSetLineMode(lmx_muxout_lines[s], PAL_MODE_INPUT);
 #endif
+    }
 
     spiStart(LMX_SPID, &lmx_spicfg);
 
@@ -238,20 +252,28 @@ void synth_init(void)
      *        runs from a stable state -- the baseline template's own
      *        R0 (0x00251C) already has FCAL_EN=1 (bit 3 set), so
      *        replaying it verbatim satisfies this step as-is. */
-    lmx_spi_write_word(0x000002UL); /* R0: RESET=1 */
-    lmx_spi_write_word(0x000000UL); /* R0: RESET=0 */
+    for (int s = 0; s < SYNTH_COUNT; s++) {
+        lmx_spi_write_word(s, 0x000002UL); /* R0: RESET=1 */
+        lmx_spi_write_word(s, 0x000000UL); /* R0: RESET=0 */
 
-    for (int i = 0; i < LMX_NUM_BASELINE_REGS; i++) {
-        lmx_spi_write_word(lmx_baseline_regs[i]);
+        for (int i = 0; i < LMX_NUM_BASELINE_REGS; i++) {
+            lmx_spi_write_word(s, lmx_baseline_regs[i]);
+        }
     }
 
     chThdSleepMilliseconds(10);
 
-    lmx_spi_write_word(lmx_baseline_regs[LMX_NUM_BASELINE_REGS - 1]); /* R0 again */
+    for (int s = 0; s < SYNTH_COUNT; s++) {
+        lmx_spi_write_word(s, lmx_baseline_regs[LMX_NUM_BASELINE_REGS - 1]); /* R0 again */
+    }
 }
 
-bool synth_set_frequency(uint64_t freq_hz)
+bool synth_set_frequency(int synth, uint64_t freq_hz)
 {
+    if (synth < 0 || synth >= SYNTH_COUNT) {
+        return false;
+    }
+
     float freq_mhz = (float)freq_hz / 1.0e6f;
 
     float fvco_mhz;
@@ -383,35 +405,41 @@ bool synth_set_frequency(uint64_t freq_hz)
     for (size_t i = 0; i < sizeof(write_order); i++) {
         uint8_t addr = write_order[i];
         uint16_t data = lmx_reg_get(regs, LMX_NUM_BASELINE_REGS, addr);
-        lmx_spi_write_word(((uint32_t)addr << 16) | data);
+        lmx_spi_write_word(synth, ((uint32_t)addr << 16) | data);
     }
     chMtxUnlock(&lmx_mtx);
 
     return true;
 }
 
-bool synth_is_locked(void)
+bool synth_is_locked(int synth)
 {
+    if (synth < 0 || synth >= SYNTH_COUNT) {
+        return false;
+    }
 #if LMX_MUXOUT_WIRED
     /* R0[2] MUXOUT_LD_SEL=1 (baked into the baseline template, bit 2
      * of R0's 0x251C is set) puts MUXOUT in plain digital lock-detect
      * mode -- no SPI readback timing needed (that path multiplexes
      * onto MUXOUT too, but with its own clocked timing; §7.5/Figure 2
      * -- deliberately not used here since it needs the same pin). */
-    return palReadLine(LMX_MUXOUT_LINE) != PAL_LOW;
+    return palReadLine(lmx_muxout_lines[synth]) != PAL_LOW;
 #else
-    return false; /* MUXOUT not wired yet -- CONFIGURE LMX_MUXOUT_LINE above */
+    return false; /* MUXOUT not wired yet -- CONFIGURE lmx_muxout_lines above */
 #endif
 }
 
-bool synth_write_raw_register(uint32_t word24)
+bool synth_write_raw_register(int synth, uint32_t word24)
 {
+    if (synth < 0 || synth >= SYNTH_COUNT) {
+        return false;
+    }
     if (word24 & 0xFF000000UL) {
         return false; /* not a 24-bit value -- caller should already
                         * have range-checked this (synth.h contract) */
     }
     chMtxLock(&lmx_mtx);
-    lmx_spi_write_word(word24);
+    lmx_spi_write_word(synth, word24);
     chMtxUnlock(&lmx_mtx);
     return true;
 }

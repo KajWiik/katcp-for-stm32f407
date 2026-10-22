@@ -49,7 +49,7 @@ common/                      -- shared, no RTOS/HAL dependency
     katcp_proto.c      Framing, escaping, tokenizing, dispatch
     katcp_commands.c   Command table and handler implementations
     synth_stub.c       Placeholder synth driver (always reports failure)
-    sensor.c           Sensor table (synth.locked, board.uptime, mcu.temperature, pac1954.*) + handlers
+    sensor.c           Sensor table (synth<N>.locked, board.uptime, mcu.temperature, pac1954.*) + handlers
     web_ui.c           HTML page + /api/status, /api/frequency routes (§11)
 targets/
   stm32-e407/               -- see §5 and its own README.md
@@ -236,18 +236,22 @@ Lists available requests, or describes one.
   #help watchdog Check the server is alive.
   #help version-list List component name and version.
   #help help Describe available requests.
-  #help synth-frequency Set synth output frequency in Hz.
-  #help synth-locked Report synth PLL lock status (0/1).
-  #help synth-write-register Write one raw 24-bit synth register word.
+  #help synth-frequency Set synth <n> output frequency in Hz.
+  #help synth-locked Report synth <n> PLL lock status (0/1).
+  #help synth-write-register Write one raw 24-bit word to synth <n>.
   #help sensor-list List available sensors, or describe one.
   #help sensor-value Report current sensor value(s).
   !help ok 9
   ```
 
-### `?synth-frequency <hz>`
-**Custom, non-core request.** Sets the synthesizer output frequency.
-- **Args:** exactly one, an unsigned integer number of Hz
-- **Reply (bad argument count):** `!synth-frequency invalid usage: ?synth-frequency <hz>`
+> **Two synthesizers (§6.5):** every `synth-*` request takes the synth
+> number, `1` or `2`, as its first argument. Anything else gets
+> `!<request> invalid synth must be 1-2`.
+
+### `?synth-frequency <synth> <hz>`
+**Custom, non-core request.** Sets one synthesizer's output frequency.
+- **Args:** exactly two: the synth number, then an unsigned integer number of Hz
+- **Reply (bad argument count):** `!synth-frequency invalid usage: ?synth-frequency <synth> <hz>`
 - **Reply (non-numeric argument):** `!synth-frequency invalid frequency must be an integer in Hz`
 - **Reply (numeric, but driver rejects it):** `!synth-frequency fail synth programming failed or out of range`
 - **Reply (success):** `!synth-frequency ok`
@@ -255,14 +259,14 @@ Lists available requests, or describes one.
   placeholder (see §6). The parsing and reply logic above is fully
   implemented and tested; only `synth_set_frequency()` itself is not.
 
-### `?synth-locked`
-**Custom, non-core request.** Reports PLL lock status.
-- **Args:** none
+### `?synth-locked <synth>`
+**Custom, non-core request.** Reports one synth's PLL lock status.
+- **Args:** exactly one, the synth number
 - **Reply:** `!synth-locked ok 0` or `!synth-locked ok 1`
 - **Current status:** always reports `0` (unlocked), since
   `synth_is_locked()` is stubbed.
 
-### `?synth-write-register <word24>`
+### `?synth-write-register <synth> <word24>`
 **Custom, non-core request.** Writes one raw 24-bit register word
 verbatim — the one-request-per-register path for replaying a
 precomputed register dump (e.g. from PLLatinumSim), as opposed to
@@ -270,9 +274,9 @@ precomputed register dump (e.g. from PLLatinumSim), as opposed to
 approach. See §6.3 for why these are genuinely different problems, not
 two ways of doing the same thing, and §10 for the Julia tooling built
 to drive this one.
-- **Args:** exactly one, a 24-bit integer (hex `0x...` or decimal —
-  `strtoul(..., 0)` auto-detects)
-- **Reply (bad argument count):** `!synth-write-register invalid usage: ?synth-write-register <24bit-value>`
+- **Args:** exactly two: the synth number, then a 24-bit integer (hex
+  `0x...` or decimal — `strtoul(..., 0)` auto-detects)
+- **Reply (bad argument count):** `!synth-write-register invalid usage: ?synth-write-register <synth> <24bit-value>`
 - **Reply (out of range):** `!synth-write-register invalid value must be a 24-bit integer (0x000000-0xFFFFFF)`
 - **Reply (in range, but driver rejects it):** `!synth-write-register fail synth register write failed`
 - **Reply (success):** `!synth-write-register ok`
@@ -318,7 +322,7 @@ of the command table.
 
   | Name | Type | Units | Range | Backed by |
   |---|---|---|---|---|
-  | `synth.locked` | boolean | *(none)* | 0–1 | `synth_is_locked()` |
+  | `synth1.locked`, `synth2.locked` | boolean | *(none)* | 0–1 | `synth_is_locked(0)` / `synth_is_locked(1)` |
   | `board.uptime` | integer | seconds | 0–INT64_MAX | `platform_now_ms()/1000` |
   | `mcu.temperature` | float | degrees_C | −40–125 | `platform_mcu_temperature_c()` (§6.2) |
   | `pac1954.ch<N>.voltage` | float | volts | 0–32 | PAC1954 VBUS, N = 1–4 (§6.4) |
@@ -328,12 +332,13 @@ of the command table.
 - **Example:**
   ```
   ?sensor-list
-  #sensor-list synth.locked Synthesizer PLL lock status \@ boolean
+  #sensor-list synth1.locked Synthesizer 1 PLL lock status \@ boolean
+  #sensor-list synth2.locked Synthesizer 2 PLL lock status \@ boolean
   #sensor-list board.uptime Seconds since boot seconds integer 0 9223372036854775807
   #sensor-list mcu.temperature STM32F407 die temperature (uncalibrated ADC estimate) degrees_C float -40.000 125.000
-  !sensor-list ok 3
+  …
   ```
-  (The `\@` is the empty-argument marker from §3.2 — `synth.locked` has
+  (The `\@` is the empty-argument marker from §3.2 — `synthN.locked` has
   no units, so an empty argument is correctly escaped rather than
   silently dropped.)
 
@@ -352,7 +357,7 @@ Reports current sensor value(s).
   "unsynced" signal, not a fake-looking placeholder number) — see §7
   for exactly when that applies.
 - **Status word:** `nominal`, `warn`, `error`, or `unknown` — the
-  `synth.*`/`board.*`/`mcu.*` sensors always report `nominal` (the read
+  `synth<N>.*`/`board.*`/`mcu.*` sensors always report `nominal` (the read
   itself can't fail; see the comment in `sensor.c` on
   `read_synth_locked` for why an *unlocked* synth is reported as a
   nominal `0` value, not a sensor error). The `pac1954.*` sensors
@@ -363,10 +368,11 @@ Reports current sensor value(s).
 - **Example** (from a live run, with the RTC already synced):
   ```
   ?sensor-value
-  #sensor-value 1789413904 1 synth.locked nominal 0
+  #sensor-value 1789413904 1 synth1.locked nominal 0
+  #sensor-value 1789413904 1 synth2.locked nominal 0
   #sensor-value 1789413904 1 board.uptime nominal 35
   #sensor-value 1789413904 1 mcu.temperature nominal 23.456
-  !sensor-value ok 3
+  …
   ```
 
 > **Not implemented:** `?sensor-sampling` (periodic/async sensor
@@ -599,10 +605,13 @@ blanket "use floats everywhere now."
 Three functions, chip-agnostic by design:
 
 ```c
-void synth_init(void);                          // one-time SPI/GPIO setup
-bool synth_set_frequency(uint64_t freq_hz);      // program the output
-bool synth_is_locked(void);                      // lock-detect status
+#define SYNTH_COUNT 2                                       // §6.5
+void synth_init(void);                                      // one-time SPI/GPIO setup, all synths
+bool synth_set_frequency(int synth, uint64_t freq_hz);      // program one synth's output
+bool synth_is_locked(int synth);                            // its lock-detect status
+bool synth_write_raw_register(int synth, uint32_t word24);  // raw 24-bit word (§6.3)
 ```
+(`synth` is 0-based here; the KATCP and web layers number synths 1–2.)
 
 `synth_stub.c` implements all three as no-ops / `false`, so the KATCP
 server is fully network-testable (including realistic `fail` replies
@@ -758,6 +767,38 @@ Verified: host build (§8) shows the expected conversions from the
 stub's fixed codes (e.g. VBUS 10240 → 5.0000 V, VSENSE 32768 at 10 mΩ →
 5.0000 A, 25.0000 W) and the `error` path; the STM32 target builds
 cleanly with no warnings. **Not yet verified on real hardware.**
+
+### 6.5 Two synthesizers on one SPI bus
+
+The board carries two LMX2594s on SPI1, sharing SCK/MISO/MOSI, each
+with its own chip select. `synth.h`'s `SYNTH_COUNT` is 2 and every
+function takes a 0-based synth index. In `synth_lmx2594.c`:
+
+- **CS lines:** `lmx_cs_lines[]` — synth 1 on PA4 (D10, as before),
+  synth 2 on **PB6, a placeholder** chosen only because the ChibiOS
+  board file leaves it free. Not confirmed against the real wiring.
+- **Init:** both CS lines are driven high (deselected) before
+  `spiStart()`. Each synth then gets the reset + full baseline-template
+  write, followed by one shared 10 ms wait and the final R0 write to
+  each.
+- **Shared configuration:** both synths are assumed to share the
+  200 MHz fPD and the same baseline register template. If they
+  don't, `LMX_FPD_HZ`/`lmx_baseline_regs[]` need to become per-synth.
+- **Locking:** one mutex covers both synths, since they share the bus
+  anyway.
+- **MUXOUT:** `lmx_muxout_lines[]` has a slot per synth, still unwired
+  (`LMX_MUXOUT_WIRED 0`).
+
+Everything that names a synth carries the number. KATCP requests take
+it as their first argument (§4), the lock sensors are `synth1.locked` and
+`synth2.locked`, the web page has one frequency box per synth (§11),
+and `julia/load_register_dump.jl` takes it before the dump file (§10.2).
+
+**This is a breaking KATCP change:** `?synth-frequency <hz>`,
+`?synth-locked` and `?synth-write-register <word>` without a synth
+number are now rejected as `invalid`. That's deliberate: silently
+defaulting to synth 1 would make an old script program the wrong
+chip without any error.
 
 ---
 
@@ -1032,8 +1073,9 @@ anywhere near hardware. Tested against:
   encoded address) — confirmed to raise a precise, line-numbered error
   rather than silently pick one interpretation.
 
-**`program_registers(host, words; port=7147)`** connects, replays
-`words` via `request_pipeline(conn, "synth-write-register", ...)`, and
+**`program_registers(host, synth, words; port=7147)`** connects, replays
+`words` to synth number `synth` (1 or 2, §6.5) via
+`request_pipeline(conn, "synth-write-register", ...)`, and
 returns a `Bool` per register. Run end-to-end against a fake server
 (mimicking the real firmware's exact reply format, including `[mid]`
 tagging) using the real 113-register fixture: all 113 sent, all 113
@@ -1051,7 +1093,7 @@ implementation.
 
 **Usage:**
 ```bash
-julia julia/load_register_dump.jl <host> <hexfile> [port]
+julia julia/load_register_dump.jl <host> <synth> <hexfile> [port]
 ```
 
 ### 10.3 Validated against a real, independent KATCP server
@@ -1102,7 +1144,8 @@ response.
 ## 11. Web interface (`common/src/web_ui.c`, `targets/stm32-e407/src/web_server.c`)
 
 A small HTTP server on the board itself, port 80: browse to
-`http://<board-ip>/` for a page with a synth frequency input (in MHz)
+`http://<board-ip>/` for a page with a frequency input (in MHz) for
+each of the two synths (§6.5), each with its own lock status,
 and a live PAC1954 table (voltage / current / power per channel,
 refreshed every second). It sits alongside KATCP rather than replacing
 it — both run at once.
@@ -1119,8 +1162,8 @@ request head, call `web_ui_handle_request()`, close.
 | Path | Returns |
 |---|---|
 | `/` | The page — self-contained HTML/CSS/JS, no external resources (the board may have no internet route) |
-| `/api/status` | `{"synth":{"locked":bool,"last_set_hz":n},"pac1954":[{"channel":1,"voltage":v,"current":a,"power":w,"status":"nominal"},…]}` — values are `null` and status `"error"` when the channel has no fresh reading (§6.4) |
-| `/api/frequency?hz=<n>` | Calls `synth_set_frequency(n)`; `{"ok":true,"hz":n}` or `{"ok":false,"error":"…"}` (400 if `hz` isn't 1–15 plain digits) |
+| `/api/status` | `{"synth":[{"synth":1,"locked":bool,"last_set_hz":n},…],"pac1954":[{"channel":1,"voltage":v,"current":a,"power":w,"status":"nominal"},…]}` — values are `null` and status `"error"` when the channel has no fresh reading (§6.4) |
+| `/api/frequency?synth=<1-2>&hz=<n>` | Calls `synth_set_frequency(synth-1, n)`; `{"ok":true,"synth":s,"hz":n}` or `{"ok":false,"error":"…"}` (400 if `synth` isn't 1–2 or `hz` isn't 1–15 plain digits) |
 
 Setting the frequency is a GET so the handler never has to parse a
 request body. That's fine on a lab network, but any page the browser
@@ -1131,7 +1174,7 @@ Sensor values are read through `sensor_table` by name, so the page
 shows exactly what `?sensor-value` would. `mcu.temperature` is
 deliberately **not** read from the HTTP thread: it drives ADC1
 directly with no locking, and two threads converting at once would
-race. `last_set_hz` only tracks frequencies set from the page;
+race. `last_set_hz` (per synth) only tracks frequencies set from the page;
 `synth.h` has no getter, so a `?synth-frequency` over KATCP doesn't
 show up there.
 

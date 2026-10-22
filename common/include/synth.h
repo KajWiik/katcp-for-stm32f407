@@ -9,16 +9,24 @@
  * the KATCP command layer programs against, so katcp_commands.c doesn't
  * need to change once the chip is picked. */
 
-/* One-time SPI + GPIO (CS/LE, muxout/lock-detect if used) setup. */
+/* Number of synthesizers on the board. They share one SPI bus, each
+ * with its own chip select. Every function below takes a 0-based
+ * `synth` index (0..SYNTH_COUNT-1) and returns false for an index out
+ * of range; the KATCP and web layers number them 1..SYNTH_COUNT for
+ * users and convert. */
+#define SYNTH_COUNT 2
+
+/* One-time SPI + GPIO (every CS/LE, muxout/lock-detect if used) setup,
+ * and power-up programming of every synth. */
 void synth_init(void);
 
-/* Program the output to freq_hz. Returns true on success (valid range,
+/* Program synth's output to freq_hz. Returns true on success (valid range,
  * SPI write completed), false otherwise. */
-bool synth_set_frequency(uint64_t freq_hz);
+bool synth_set_frequency(int synth, uint64_t freq_hz);
 
-/* Returns true if the synth's lock-detect line reports locked.
+/* Returns true if synth's lock-detect line reports locked.
  * (Stubbed false-always until wired to real hardware.) */
-bool synth_is_locked(void);
+bool synth_is_locked(int synth);
 
 /* Writes one raw 24-bit register word verbatim over SPI -- the exact
  * on-the-wire format LMX2594-style parts use: bits [23:16] are the
@@ -31,6 +39,6 @@ bool synth_is_locked(void);
  * can be replayed byte-for-byte, foolproof but not usable for a
  * frequency sweep -- see IMPLEMENTATION.md for the fuller discussion
  * of why that's a deliberate, separate problem from ?synth-frequency. */
-bool synth_write_raw_register(uint32_t word24);
+bool synth_write_raw_register(int synth, uint32_t word24);
 
 #endif /* SYNTH_H */

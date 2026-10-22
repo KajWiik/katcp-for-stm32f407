@@ -9,7 +9,9 @@
 # fundamentally a line-oriented request/reply protocol, not a bulk
 # transport -- fighting that with bigger buffers would be the wrong fix.
 #
-# Usage: julia load_register_dump.jl <host> <hexfile> [port]
+# Usage: julia load_register_dump.jl <host> <synth> <hexfile> [port]
+#   <synth> is 1 or 2 -- which of the board's two LMX2594s (separate CS
+#   lines) to program.
 
 include(joinpath(@__DIR__, "KatcpClient", "src", "KatcpClient.jl"))
 using .KatcpClient
@@ -71,11 +73,13 @@ function parse_register_dump(path::AbstractString)::Vector{UInt32}
 end
 
 """
-    program_registers(host, words; port=7147) -> Vector{Bool}
+    program_registers(host, synth, words; port=7147) -> Vector{Bool}
 
 Connects to `host`, replays `words` (in the order given -- see
-[`parse_register_dump`](@ref) on why that order matters) via
-`?synth-write-register`, pipelined over one connection, and returns a
+[`parse_register_dump`](@ref) on why that order matters) to synth
+number `synth` (1-based, as the firmware's KATCP commands count them)
+via `?synth-write-register <synth> <word>`, pipelined over one
+connection, and returns a
 `Bool` per register indicating whether that individual write
 succeeded (`status == "ok"`).
 
@@ -88,11 +92,11 @@ failure is also something a caller may want to inspect rather than
 have hidden behind an exception (e.g. to know exactly which register
 didn't take before deciding whether to retry or abort).
 """
-function program_registers(host::AbstractString, words::Vector{UInt32};
-                            port::Integer=7147)
+function program_registers(host::AbstractString, synth::Integer,
+                            words::Vector{UInt32}; port::Integer=7147)
     conn = connect_katcp(host, port)
     try
-        arglists = [["0x" * string(w, base=16, pad=6)] for w in words]
+        arglists = [[string(synth), "0x" * string(w, base=16, pad=6)] for w in words]
         replies = request_pipeline(conn, "synth-write-register", arglists)
         return [r.status == "ok" for r in replies]
     finally
@@ -101,18 +105,19 @@ function program_registers(host::AbstractString, words::Vector{UInt32};
 end
 
 function main()
-    if length(ARGS) < 2
-        println(stderr, "usage: julia load_register_dump.jl <host> <hexfile> [port]")
+    if length(ARGS) < 3
+        println(stderr, "usage: julia load_register_dump.jl <host> <synth> <hexfile> [port]")
         exit(1)
     end
     host    = ARGS[1]
-    hexfile = ARGS[2]
-    port    = length(ARGS) >= 3 ? parse(Int, ARGS[3]) : 7147
+    synth   = parse(Int, ARGS[2])
+    hexfile = ARGS[3]
+    port    = length(ARGS) >= 4 ? parse(Int, ARGS[4]) : 7147
 
     words = parse_register_dump(hexfile)
     println("Parsed $(length(words)) register(s) from $hexfile")
 
-    results = program_registers(host, words; port=port)
+    results = program_registers(host, synth, words; port=port)
     nfail = count(!, results)
     if nfail == 0
         println("All $(length(words)) register writes succeeded.")

@@ -10,9 +10,9 @@
 
 /* ---- individual sensor read functions ----------------------------------- */
 
-static sensor_status_t read_synth_locked(sensor_value_t *out)
+static sensor_status_t read_synth_locked(int synth, sensor_value_t *out)
 {
-    out->i = synth_is_locked() ? 1 : 0;
+    out->i = synth_is_locked(synth) ? 1 : 0;
     /* The read itself always succeeds (it's just a GPIO/status query);
      * "unlocked" is a normal, nominal state to report while the synth
      * is unprogrammed or settling, not a sensor failure. Whether an
@@ -20,6 +20,11 @@ static sensor_status_t read_synth_locked(sensor_value_t *out)
      * during normal operation is a policy call left open here. */
     return SENSOR_STATUS_NOMINAL;
 }
+
+/* One wrapper per synth -- sensor_read_fn takes no user argument. */
+_Static_assert(SYNTH_COUNT == 2, "add/remove synthN.locked wrappers and table rows");
+static sensor_status_t read_synth1_locked(sensor_value_t *out) { return read_synth_locked(0, out); }
+static sensor_status_t read_synth2_locked(sensor_value_t *out) { return read_synth_locked(1, out); }
 
 static sensor_status_t read_uptime_s(sensor_value_t *out)
 {
@@ -99,8 +104,10 @@ PAC1954_READERS(4)
       4, read_pac1954_ch##n##_power }
 
 const sensor_def_t sensor_table[] = {
-    { "synth.locked", "Synthesizer PLL lock status", "",
-      SENSOR_BOOLEAN, {0}, {1}, 0, read_synth_locked },
+    { "synth1.locked", "Synthesizer 1 PLL lock status", "",
+      SENSOR_BOOLEAN, {0}, {1}, 0, read_synth1_locked },
+    { "synth2.locked", "Synthesizer 2 PLL lock status", "",
+      SENSOR_BOOLEAN, {0}, {1}, 0, read_synth2_locked },
     { "board.uptime", "Seconds since boot", "seconds",
       SENSOR_INTEGER, {0}, {INT64_MAX}, 0, read_uptime_s },
     { "mcu.temperature", "STM32F407 die temperature (uncalibrated ADC estimate)", "degrees_C",

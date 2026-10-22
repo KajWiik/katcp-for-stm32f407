@@ -18,19 +18,22 @@ void synth_init(void)
      * chip and pin assignment are decided. */
 }
 
-bool synth_set_frequency(uint64_t freq_hz)
+bool synth_set_frequency(int synth, uint64_t freq_hz)
 {
+    (void)synth;
     (void)freq_hz;
     return false; /* not implemented yet */
 }
 
-bool synth_is_locked(void)
+bool synth_is_locked(int synth)
 {
+    (void)synth;
     return false;
 }
 
-bool synth_write_raw_register(uint32_t word24)
+bool synth_write_raw_register(int synth, uint32_t word24)
 {
+    (void)synth;
     (void)word24;
     return false; /* not implemented yet */
 }
