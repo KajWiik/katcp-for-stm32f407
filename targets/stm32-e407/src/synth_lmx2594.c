@@ -63,6 +63,12 @@
  * of "it locks, but to the wrong frequency" if it's wrong. */
 #define LMX_FPD_HZ        200000000.0f
 
+/* Serializes whole programming sequences: both the KATCP thread and
+ * the HTTP thread (web_server.c) can call into this driver, and
+ * spiAcquireBus() alone only keeps single 24-bit words intact -- two
+ * interleaved frequency changes would mix their register sets. */
+static MUTEX_DECL(lmx_mtx);
+
 /* ====================================================================
  * Baseline register template
  *
@@ -373,11 +379,13 @@ bool synth_set_frequency(uint64_t freq_hz)
      * every field this retune may have touched, address-descending,
      * with R0/FCAL_EN written last as required. */
     static const uint8_t write_order[] = { 75, 46, 45, 43, 42, 39, 38, 37, 36, 34, 20, 14, 0 };
+    chMtxLock(&lmx_mtx);
     for (size_t i = 0; i < sizeof(write_order); i++) {
         uint8_t addr = write_order[i];
         uint16_t data = lmx_reg_get(regs, LMX_NUM_BASELINE_REGS, addr);
         lmx_spi_write_word(((uint32_t)addr << 16) | data);
     }
+    chMtxUnlock(&lmx_mtx);
 
     return true;
 }
@@ -402,6 +410,8 @@ bool synth_write_raw_register(uint32_t word24)
         return false; /* not a 24-bit value -- caller should already
                         * have range-checked this (synth.h contract) */
     }
+    chMtxLock(&lmx_mtx);
     lmx_spi_write_word(word24);
+    chMtxUnlock(&lmx_mtx);
     return true;
 }

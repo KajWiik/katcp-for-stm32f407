@@ -136,6 +136,7 @@ CSRC = $(ALLCSRC) \
        src/rtc_sync.c \
        src/synth_lmx2594.c \
        src/pac1954_i2c.c \
+       src/web_server.c \
        src/main.c
 
 # C++ sources that can be compiled in ARM or THUMB mode depending on the

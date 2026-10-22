@@ -42,6 +42,7 @@ common/                      -- shared, no RTOS/HAL dependency
     katcp_commands.h   Command table declaration + halt flag
     synth.h            Fixed contract for the synth driver
     pac1954.h          Fixed contract for the PAC1954 power monitor + code-to-unit helpers (§6.4)
+    web_ui.h           Browser front-end request handler, transport-agnostic (§11)
     sensor.h           Fixed contract for the sensor table + handlers
     platform.h         Monotonic + wall-clock time + MCU temperature abstraction (target vs. host builds)
   src/
@@ -49,6 +50,7 @@ common/                      -- shared, no RTOS/HAL dependency
     katcp_commands.c   Command table and handler implementations
     synth_stub.c       Placeholder synth driver (always reports failure)
     sensor.c           Sensor table (synth.locked, board.uptime, mcu.temperature, pac1954.*) + handlers
+    web_ui.c           HTML page + /api/status, /api/frequency routes (§11)
 targets/
   stm32-e407/               -- see §5 and its own README.md
     src/
@@ -56,6 +58,7 @@ targets/
       platform_chibios.c  platform.h implementation (RTC-backed wall clock)
       rtc_sync.c       SNTP-based RTC sync (§7)
       pac1954_i2c.c    PAC1954 driver over I2C1, background polling thread (§6.4)
+      web_server.c/.h  HTTP-over-lwIP-socket thread on port 80 serving web_ui.c (§11)
       portab.c/.h      Minimal board hook (LED heartbeat)
     cfg/               chconf.h / halconf.h / mcuconf.h / lwipopts.h
     Makefile
@@ -1093,3 +1096,61 @@ itself, confirming a genuine live connection rather than a cached
 response.
 
 ---
+
+---
+
+## 11. Web interface (`common/src/web_ui.c`, `targets/stm32-e407/src/web_server.c`)
+
+A small HTTP server on the board itself, port 80: browse to
+`http://<board-ip>/` for a page with a synth frequency input (in MHz)
+and a live PAC1954 table (voltage / current / power per channel,
+refreshed every second). It sits alongside KATCP rather than replacing
+it — both run at once.
+
+**Split, same as KATCP:** `web_ui.c` (in `common/`, no RTOS/lwIP
+dependency) turns one request's text into response bytes through an
+output callback, like `katcp_feed()`/`katcp_out_fn`. `web_server.c`
+is the target glue: its own ChibiOS thread (`NORMALPRIO-1`, 3 KB
+stack), blocking lwIP sockets, one connection at a time, read the
+request head, call `web_ui_handle_request()`, close.
+
+**Routes** (GET only; anything else is 405, unknown paths 404):
+
+| Path | Returns |
+|---|---|
+| `/` | The page — self-contained HTML/CSS/JS, no external resources (the board may have no internet route) |
+| `/api/status` | `{"synth":{"locked":bool,"last_set_hz":n},"pac1954":[{"channel":1,"voltage":v,"current":a,"power":w,"status":"nominal"},…]}` — values are `null` and status `"error"` when the channel has no fresh reading (§6.4) |
+| `/api/frequency?hz=<n>` | Calls `synth_set_frequency(n)`; `{"ok":true,"hz":n}` or `{"ok":false,"error":"…"}` (400 if `hz` isn't 1–15 plain digits) |
+
+Setting the frequency is a GET so the handler never has to parse a
+request body. That's fine on a lab network, but any page the browser
+loads could trigger it (CSRF), and there's no authentication at all —
+same trust model as the KATCP port.
+
+Sensor values are read through `sensor_table` by name, so the page
+shows exactly what `?sensor-value` would. `mcu.temperature` is
+deliberately **not** read from the HTTP thread: it drives ADC1
+directly with no locking, and two threads converting at once would
+race. `last_set_hz` only tracks frequencies set from the page;
+`synth.h` has no getter, so a `?synth-frequency` over KATCP doesn't
+show up there.
+
+**Supporting changes:**
+- `synth_lmx2594.c` now holds a mutex across each whole programming
+  sequence (`synth_set_frequency()`'s register writes,
+  `synth_write_raw_register()`). With two threads able to call it,
+  `spiAcquireBus()` alone only kept individual 24-bit words intact,
+  not a 13-register retune.
+- `cfg/lwipopts.h`: `MEMP_NUM_NETCONN` and `MEMP_NUM_TCP_PCB` raised to
+  8 (two listeners plus clients exceeded lwIP's defaults of 4/5), and
+  `LWIP_SO_RCVTIMEO=1` so the HTTP thread can put a 2 s receive
+  timeout on each client. Browsers open speculative connections they
+  may never send on, and without the timeout one of those would block
+  the single-connection server indefinitely.
+
+**Verified:** the target builds cleanly (no warnings; `.text` grows by
+about 7 KB). On the host, `web_ui_handle_request()` was driven both
+directly and through a throwaway POSIX socket server, and the page was
+loaded in headless Chromium against the §8 stubs: the table fills in,
+the set-frequency round trip works (showing the stub synth's "failed"),
+and there were no JS errors. **Not yet run on the board.**

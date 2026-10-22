@@ -27,6 +27,7 @@
 #include "platform.h"
 #include "portab.h"
 #include "rtc_sync.h"
+#include "web_server.h"
 
 #define KATCP_PORT 7147
 
@@ -162,6 +163,7 @@ int main(void)
 
     chThdCreateStatic(wa_katcp_thread, sizeof(wa_katcp_thread),
                        NORMALPRIO, katcp_thread, NULL);
+    web_server_start();
 
     /* Heartbeat -- main() becomes the idle-priority loop once its
      * setup work is done; just blinks the board LED as a simple

@@ -22,6 +22,17 @@
  * spare, so there's no reason to run close to the edge. */
 #define MEM_SIZE                         8192
 
+/* Two TCP servers now (KATCP on 7147, HTTP on 80 -- see
+ * src/web_server.c), each a listener plus accepted/pending clients;
+ * lwIP's default of 4 netconns / 5 TCP PCBs leaves no headroom once a
+ * browser opens a couple of parallel connections. */
+#define MEMP_NUM_NETCONN                 8
+#define MEMP_NUM_TCP_PCB                 8
+
+/* SO_RCVTIMEO, used by src/web_server.c so an idle browser connection
+ * can't stall the single-connection HTTP server. */
+#define LWIP_SO_RCVTIMEO                 1
+
 #if !defined(TCPIP_MBOX_SIZE)
 #define TCPIP_MBOX_SIZE                  MEMP_NUM_PBUF
 #endif
