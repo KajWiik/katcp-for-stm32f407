@@ -23,6 +23,7 @@
 #include "katcp_proto.h"
 #include "katcp_commands.h"
 #include "synth.h"
+#include "pac1954.h"
 #include "platform.h"
 #include "portab.h"
 #include "rtc_sync.h"
@@ -156,6 +157,7 @@ int main(void)
     network_bringup();
     rtc_sync_start(&ntp_server_ip);
     synth_init();
+    pac1954_init();
     portab_setup();
 
     chThdCreateStatic(wa_katcp_thread, sizeof(wa_katcp_thread),

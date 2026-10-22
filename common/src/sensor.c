@@ -1,6 +1,7 @@
 #include "sensor.h"
 #include "synth.h"
 #include "platform.h"
+#include "pac1954.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -36,7 +37,66 @@ static sensor_status_t read_mcu_temperature(sensor_value_t *out)
     return SENSOR_STATUS_NOMINAL;
 }
 
+/* PAC1954 power monitor (IMPLEMENTATION.md §6.4). Unlike the sensors
+ * above, these reads genuinely can fail (chip absent, I2C error, stale
+ * snapshot) -- reported as SENSOR_STATUS_ERROR with a 0 value rather
+ * than a plausible-looking stale number. Voltage, current and power
+ * for one channel all come from the same refresh, so power is
+ * consistent with the other two rather than computed across reads. */
+static const double pac1954_rsense_ohms[PAC1954_NUM_CHANNELS] = {
+    PAC1954_RSENSE_CH1_OHMS, PAC1954_RSENSE_CH2_OHMS,
+    PAC1954_RSENSE_CH3_OHMS, PAC1954_RSENSE_CH4_OHMS,
+};
+
+typedef enum { PAC_VOLTAGE, PAC_CURRENT, PAC_POWER } pac_quantity_t;
+
+static sensor_status_t read_pac1954(int ch, pac_quantity_t q, sensor_value_t *out)
+{
+    uint16_t vbus_code, vsense_code;
+    if (!pac1954_read_raw(ch, &vbus_code, &vsense_code)) {
+        out->f = 0.0;
+        return SENSOR_STATUS_ERROR;
+    }
+    double v = pac1954_vbus_volts(vbus_code);
+    double i = pac1954_vsense_volts(vsense_code) / pac1954_rsense_ohms[ch];
+    switch (q) {
+        case PAC_VOLTAGE: out->f = v;     break;
+        case PAC_CURRENT: out->f = i;     break;
+        case PAC_POWER:   out->f = v * i; break;
+    }
+    return SENSOR_STATUS_NOMINAL;
+}
+
+/* sensor_read_fn takes no user argument, so each (channel, quantity)
+ * pair needs its own thin wrapper. */
+#define PAC1954_READERS(n)                                                     \
+    static sensor_status_t read_pac1954_ch##n##_voltage(sensor_value_t *out)   \
+    { return read_pac1954((n) - 1, PAC_VOLTAGE, out); }                        \
+    static sensor_status_t read_pac1954_ch##n##_current(sensor_value_t *out)   \
+    { return read_pac1954((n) - 1, PAC_CURRENT, out); }                        \
+    static sensor_status_t read_pac1954_ch##n##_power(sensor_value_t *out)     \
+    { return read_pac1954((n) - 1, PAC_POWER, out); }
+
+PAC1954_READERS(1)
+PAC1954_READERS(2)
+PAC1954_READERS(3)
+PAC1954_READERS(4)
+
 /* ---- the table ------------------------------------------------------------ */
+
+/* Ranges are the chip's full-scale limits for the configured shunt
+ * (unipolar defaults, see pac1954.h), not expected operating ranges. */
+#define PAC1954_IMAX_A(n) (PAC1954_VSENSE_FSR_V / PAC1954_RSENSE_CH##n##_OHMS)
+#define PAC1954_SENSORS(n)                                                     \
+    { "pac1954.ch" #n ".voltage", "PAC1954 channel " #n " bus voltage", "volts", \
+      SENSOR_FLOAT, {.f = 0.0}, {.f = PAC1954_VBUS_FSR_V}, 4,                  \
+      read_pac1954_ch##n##_voltage },                                          \
+    { "pac1954.ch" #n ".current", "PAC1954 channel " #n " current", "amperes", \
+      SENSOR_FLOAT, {.f = 0.0}, {.f = PAC1954_IMAX_A(n)}, 4,                   \
+      read_pac1954_ch##n##_current },                                          \
+    { "pac1954.ch" #n ".power", "PAC1954 channel " #n " power", "watts",       \
+      SENSOR_FLOAT, {.f = 0.0}, {.f = PAC1954_VBUS_FSR_V * PAC1954_IMAX_A(n)}, \
+      4, read_pac1954_ch##n##_power }
 
 const sensor_def_t sensor_table[] = {
     { "synth.locked", "Synthesizer PLL lock status", "",
@@ -45,6 +105,10 @@ const sensor_def_t sensor_table[] = {
       SENSOR_INTEGER, {0}, {INT64_MAX}, 0, read_uptime_s },
     { "mcu.temperature", "STM32F407 die temperature (uncalibrated ADC estimate)", "degrees_C",
       SENSOR_FLOAT, {.f = -40.0}, {.f = 125.0}, 3, read_mcu_temperature },
+    PAC1954_SENSORS(1),
+    PAC1954_SENSORS(2),
+    PAC1954_SENSORS(3),
+    PAC1954_SENSORS(4),
 };
 const int sensor_table_len = sizeof(sensor_table) / sizeof(sensor_table[0]);
 

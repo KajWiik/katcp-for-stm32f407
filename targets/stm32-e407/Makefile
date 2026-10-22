@@ -135,6 +135,7 @@ CSRC = $(ALLCSRC) \
        src/platform_chibios.c \
        src/rtc_sync.c \
        src/synth_lmx2594.c \
+       src/pac1954_i2c.c \
        src/main.c
 
 # C++ sources that can be compiled in ARM or THUMB mode depending on the

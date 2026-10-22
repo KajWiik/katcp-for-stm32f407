@@ -41,24 +41,27 @@ common/                      -- shared, no RTOS/HAL dependency
     katcp_proto.h      Wire protocol types and API (transport-agnostic)
     katcp_commands.h   Command table declaration + halt flag
     synth.h            Fixed contract for the synth driver
+    pac1954.h          Fixed contract for the PAC1954 power monitor + code-to-unit helpers (§6.4)
     sensor.h           Fixed contract for the sensor table + handlers
     platform.h         Monotonic + wall-clock time + MCU temperature abstraction (target vs. host builds)
   src/
     katcp_proto.c      Framing, escaping, tokenizing, dispatch
     katcp_commands.c   Command table and handler implementations
     synth_stub.c       Placeholder synth driver (always reports failure)
-    sensor.c           Sensor table (synth.locked, board.uptime, mcu.temperature) + handlers
+    sensor.c           Sensor table (synth.locked, board.uptime, mcu.temperature, pac1954.*) + handlers
 targets/
   stm32-e407/               -- see §5 and its own README.md
     src/
       main.c           ChibiOS/lwIP glue: network bring-up, KATCP-over-socket thread
       platform_chibios.c  platform.h implementation (RTC-backed wall clock)
       rtc_sync.c       SNTP-based RTC sync (§7)
+      pac1954_i2c.c    PAC1954 driver over I2C1, background polling thread (§6.4)
       portab.c/.h      Minimal board hook (LED heartbeat)
     cfg/               chconf.h / halconf.h / mcuconf.h / lwipopts.h
     Makefile
 test/
   platform_host.c      platform.h implementation for desktop tests (§8)
+  pac1954_stub.c       pac1954.h stand-in with fixed raw codes for desktop tests (§8)
 julia/
   KatcpClient/         General-purpose KATCP client package (§10.1)
   load_register_dump.jl  LMX2594 register-dump replay tool (§10.2)
@@ -315,6 +318,9 @@ of the command table.
   | `synth.locked` | boolean | *(none)* | 0–1 | `synth_is_locked()` |
   | `board.uptime` | integer | seconds | 0–INT64_MAX | `platform_now_ms()/1000` |
   | `mcu.temperature` | float | degrees_C | −40–125 | `platform_mcu_temperature_c()` (§6.2) |
+  | `pac1954.ch<N>.voltage` | float | volts | 0–32 | PAC1954 VBUS, N = 1–4 (§6.4) |
+  | `pac1954.ch<N>.current` | float | amperes | 0–0.1/R<sub>sense</sub> | PAC1954 VSENSE / shunt (§6.4) |
+  | `pac1954.ch<N>.power` | float | watts | 0–32·0.1/R<sub>sense</sub> | voltage × current, same refresh (§6.4) |
 
 - **Example:**
   ```
@@ -342,11 +348,13 @@ Reports current sensor value(s).
   Reports `0` if the device has no synced wall clock yet (an honest
   "unsynced" signal, not a fake-looking placeholder number) — see §7
   for exactly when that applies.
-- **Status word:** `nominal`, `warn`, `error`, or `unknown` — both
-  current sensors always report `nominal` (the read itself can't fail;
-  see the comment in `sensor.c` on `read_synth_locked` for why an
-  *unlocked* synth is reported as a nominal `0` value, not a sensor
-  error)
+- **Status word:** `nominal`, `warn`, `error`, or `unknown` — the
+  `synth.*`/`board.*`/`mcu.*` sensors always report `nominal` (the read
+  itself can't fail; see the comment in `sensor.c` on
+  `read_synth_locked` for why an *unlocked* synth is reported as a
+  nominal `0` value, not a sensor error). The `pac1954.*` sensors
+  report `error` (value `0`) when the chip has no fresh reading — not
+  on the bus, I2C errors, or the last good poll older than 1 s (§6.4)
 - **With argument:** single sensor's value + `!sensor-value ok 1`, or
   `!sensor-value fail unknown sensor`
 - **Example** (from a live run, with the RTC already synced):
@@ -698,6 +706,56 @@ for loading known-good configurations — which is exactly what's been
 built so far. `?synth-frequency` staying stubbed is a real, open gap
 (§9), not an oversight.
 
+### 6.4 PAC1954 power monitor (`pac1954.h` / `targets/stm32-e407/src/pac1954_i2c.c`)
+
+Microchip PAC1954: four-channel I2C bus-voltage/current/power monitor.
+Exposed as twelve `SENSOR_FLOAT` sensors, `pac1954.ch<N>.voltage`,
+`.current` and `.power` for N = 1–4 (§4).
+
+**Split, same discipline as `synth.h`:** `common/include/pac1954.h` is
+the contract; the target driver only returns raw 16-bit register codes
+(`pac1954_read_raw()`), and all code-to-unit conversion
+(`pac1954_vbus_volts()`, `pac1954_vsense_volts()`, division by the
+shunt resistance, V×I for power) lives in `common/` — so it compiles
+and is exercised in the desktop build (§8) via `test/pac1954_stub.c`.
+
+**Driver (`pac1954_i2c.c`):** I2C1 at 400 kHz on PB8 (SCL) / PB9
+(SDA) — the E407's UEXT I2C, already muxed as AF4 open-drain by the
+ChibiOS `OLIMEX_STM32_E407_REV_D` board file. `HAL_USE_I2C` and
+`STM32_I2C_USE_I2C1` are now `TRUE` (I2C1 DMA streams 1/0 and 1/6 don't
+collide with SPI1's or ADC1's on DMA2). A `NORMALPRIO-1` thread polls
+every 100 ms: `REFRESH_V` (0x1F — latches new data *without* resetting
+the accumulators, unlike plain `REFRESH`), waits 2 ms (datasheet
+minimum is 1 ms), then reads `VBUSn_AVG` (0x0F–0x12) and
+`VSENSEn_AVG` (0x13–0x16), the chip's rolling 8-sample averages. Each
+register is its own 2-byte transaction rather than one block read,
+because block reads on this family skip disabled channels' registers.
+A full successful poll is published as one mutex-protected snapshot,
+so `?sensor-value`'s voltage, current and power for a channel always
+come from the same refresh, and the sensor read never touches the bus
+(`sensor.h`'s "must not block"). A timed-out transfer stops and
+restarts the I2C driver, as ChibiOS's `hal_i2c` requires.
+
+**Assumptions to check against real hardware** (all marked
+`CONFIGURE` in the source):
+- **I2C address** `0x10` — placeholder; the real value is set by the
+  ADDRSEL resistor strap.
+- **Shunt resistors** `PAC1954_RSENSE_CH<N>_OHMS`, default 10 mΩ
+  (10 A full scale). Override per build, e.g.
+  `make UDEFS=-DPAC1954_RSENSE_CH1_OHMS=0.05`. A wrong value scales
+  current and power silently; voltage is unaffected.
+- **Power-on default configuration** — 1024 SPS, all channels on,
+  **unipolar** ranges (VBUS 0–32 V, VSENSE 0–100 mV, `NEG_PWR_FSR` =
+  0). Nothing writes `CTRL`/`NEG_PWR_FSR`; enabling bipolar ranges
+  would require changing the conversion helpers too.
+- No Product/Manufacturer ID check is done; "present" just means the
+  chip ACKs and returns data.
+
+Verified: host build (§8) shows the expected conversions from the
+stub's fixed codes (e.g. VBUS 10240 → 5.0000 V, VSENSE 32768 at 10 mΩ →
+5.0000 A, 25.0000 W) and the `error` path; the STM32 target builds
+cleanly with no warnings. **Not yet verified on real hardware.**
+
 ---
 
 ## 7. RTC time sync (`targets/stm32-e407/src/rtc_sync.c`)
@@ -801,7 +859,8 @@ in any target's build files — it exists only for this desktop path.
 # from the repo root
 gcc -Wall -Wextra -std=c11 -Icommon/include -o test_harness \
     test_harness.c common/src/katcp_proto.c common/src/katcp_commands.c \
-    common/src/synth_stub.c common/src/sensor.c test/platform_host.c
+    test/synth_stub.c test/pac1954_stub.c common/src/sensor.c \
+    test/platform_host.c
 ```
 
 where `test_harness.c` is a few lines supplying a `katcp_out_fn` that
@@ -847,6 +906,9 @@ $ nc 192.168.1.200 7147
 - **Single client / no interrupt-driven I/O** — see §5.2, §5.4; fine
   at current scale, worth reconsidering if usage patterns change.
 - **No sensor exposing RTC sync status** — see §7.
+- **PAC1954 untested on hardware** — I2C address, shunt values and
+  default-range assumptions are placeholders (§6.4). Energy
+  accumulator readout (`VACCn`) isn't exposed yet.
 - **`mcu.temperature` has no `TS_CAL1` calibration** — see §6.2; a
   worthwhile follow-up once the calibration address/format is
   confirmed against ST's actual reference manual for this part.
